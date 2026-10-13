@@ -1,0 +1,18 @@
+/* Browser study layer only; none of these rules alter the archived files. */
+body { background: #080d15 !important; }
+#study-map { position: absolute; left: 0; top: 0; transform-origin: 0 0; pointer-events: none; opacity: .8; }
+#study-map img { position: absolute; width: 256px; height: 256px; max-width: none; user-select: none; }
+#study-controls { position: fixed; right: 16px; bottom: 16px; z-index: 500; max-width: min(560px, calc(100vw - 32px));
+  color: #e9eff8; background: #121822f5; border: 1px solid #97b7de55; border-radius: 8px; padding: 12px 14px;
+  font: 12px/1.6 "Segoe UI", "Microsoft YaHei", sans-serif; box-shadow: 0 8px 30px #0008; }
+#study-controls .study-title { color: #ffb454; font-weight: 600; letter-spacing: .04em; }
+#study-controls p { margin: 4px 0 8px; color: #9fb0c3; }
+#study-controls .study-actions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+#study-controls button, #study-controls a { padding: 4px 9px; border: 1px solid #97b7de44; border-radius: 4px;
+  background: #ffffff08; color: #e9eff8; font: inherit; text-decoration: none; cursor: pointer; }
+#study-controls button:hover, #study-controls a:hover { border-color: #ffb454aa; color: #ffb454; }
+#study-controls #study-note { color: #45c8ff; margin-top: 6px; min-height: 19px; }
+#study-controls button[aria-pressed=true] { color: #ffb454; border-color: #ffb45488; }
+#marker-layer .marker { pointer-events: auto !important; cursor: pointer; }
+#marker-layer .marker img { pointer-events: none; }
+body.tracking-unlocked #marker-layer .marker { pointer-events: none !important; }

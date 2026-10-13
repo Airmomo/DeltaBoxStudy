@@ -1,0 +1,12 @@
+:root { color-scheme: dark; font: 16px/1.75 "Segoe UI", "Microsoft YaHei", sans-serif; color: #dce5f2; background: #090e16; }
+* { box-sizing: border-box; } body { margin: 0; } main { max-width: 980px; padding: 68px 28px 36px; margin: auto; }
+.eyebrow { font: 12px/1.5 Consolas, monospace; color: #ffb454; letter-spacing: .15em; }
+h1 { font-size: clamp(30px, 5vw, 48px); line-height: 1.35; color: #f2f5fb; margin: 24px 0; }
+h2 { font-size: 22px; line-height: 1.4; color: #edf3fc; } .lead { max-width: 740px; color: #a8b7cb; font-size: 18px; }
+a { color: #69cfff; text-underline-offset: 4px; } a:hover { color: #ffb454; } .actions { display: flex; flex-wrap: wrap; gap: 14px; align-items: center; margin: 30px 0; }
+.actions .primary { color: #141a23; background: #ffb454; padding: 12px 22px; border-radius: 6px; font-weight: 600; text-decoration: none; }
+section { margin-top: 32px; padding: 24px 28px; background: #131a25; border: 1px solid #97b7de29; border-radius: 10px; }
+.facts { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; } .facts strong { display: block; font-size: 28px; color: #ffb454; } .facts span { font-size: 13px; color: #9fb0c3; }
+ul { padding-left: 22px; } li { margin: 10px 0; } .author { display: grid; grid-template-columns: 1fr 210px; gap: 26px; align-items: center; }
+figure { margin: 0; } figure img { width: 100%; display: block; border-radius: 6px; } figcaption { text-align: center; color: #9fb0c3; font-size: 12px; margin-top: 8px; }
+footer { margin-top: 28px; font-size: 12px; color: #8b9cb3; } @media(max-width:600px) { main { padding: 30px 18px; } section { padding: 18px; } .facts { grid-template-columns: 1fr; } .author { grid-template-columns: 1fr; } figure { max-width: 210px; } }

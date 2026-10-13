@@ -1,0 +1,2833 @@
+<!doctype html>
+<html lang="zh-CN" class="dark">
+<head>
+<meta charset="UTF-8">
+<title>三角洲鼠鼠导航</title>
+<link rel="stylesheet" href="data/site_external.css">
+<link rel="stylesheet" href="data/site_runtime.css">
+<style>
+  /* 覆盖：overlay 全屏地图区域 + 穿透基础 */
+  html, body { width: 100%; height: 100%; margin: 0; background: transparent !important; overflow: hidden; }
+  #maproot {
+    position: fixed; inset: 0; width: 100% !important; height: 100% !important;
+    overflow: hidden; pointer-events: none;
+    background: transparent !important; /* 透明背景用于透出游戏画面 */
+  }
+  #marker-layer { position: absolute; inset: 0; --badge-inv: 1; }
+  #popup-layer { position: absolute; inset: 0; pointer-events: none; }
+  /* 徽章不随地图缩放：marker-layer 整体带 view.scale，marker-grid 用 --badge-inv
+     （applyView 里设为 BADGE_K/view.scale，BADGE_K=32/68）反向缩放——68px 设计
+     恒定显示为 32px，形状与内部比例保持原样 */
+  #marker-layer .marker-grid { transform: scale(var(--badge-inv)); }
+  /* 徽章中心对准点位坐标。site_external.css 的 .marker 使用图钉式
+     translate(-50%,-100%)（底边贴点、徽章整体悬在点上方），照搬会让游戏画面上
+     每个物资点看起来整体偏上半个徽章；ID 选择器在此覆盖为居中锚定，
+     与 hitPoints（以点位为圆心 ±mSize/2）的命中几何一致 */
+  #marker-layer .marker { position: absolute; pointer-events: none; transform: translate(-50%, -50%); }
+  #world-svg { position: absolute; left: 0; top: 0; overflow: visible; pointer-events: none; }
+  /* 图标/文字按世界单位构建尺寸，随图层 transform 与地图同步缩放 */
+  .tracking-unlocked #marker-layer, .tracking-unlocked #label-layer,
+  .tracking-unlocked #world-svg { visibility: hidden; }
+  .tracking-unlocked #marker-layer .marker { pointer-events: none; }
+  /* 无信号临时地图：瓦片底图纯视觉层（pointer-events:none 整层穿透，鼠标直达
+     游戏），仅 tracking-nosignal 且底图开关开启时显示；点位/标签沿用锁定态渲染与交互。
+     #ns-clip 默认覆盖完整视口，仅按新鲜画面识别到的游戏任务/图例面板矩形遮罩；
+     面板隐藏时不保留侧边或底部空带。#tile-layer 是被 view 变换
+     的世界坐标层，其 img 必须显式 max-width:none——继承的
+     img,video{max-width:100%} 会把瓦片钳到无宽容器上（实测渲染宽度 0） */
+  #ns-clip {
+    position: absolute; inset: 0; pointer-events: none; display: none;
+    overflow: hidden; mask-mode: luminance;
+  }
+  .tracking-nosignal:not(.nosignal-map-hidden) #ns-clip { display: block; }
+  #tile-layer { position: absolute; left: 0; top: 0; pointer-events: none; opacity: .25; }
+  #tile-layer img { position: absolute; width: 256px; height: 256px; max-width: none; user-select: none; }
+  /* 头部开关行：地图名称行下方独立一行（自动换图 / 地标 / 无信号临时地图） */
+  .sb-head-sw { display: flex; align-items: center; gap: 8px 14px; margin-top: 6px; flex-wrap: wrap; }
+  #tracking-status {
+    position: fixed; right: 16px; top: 12px; z-index: 199; pointer-events: none;
+    color: #d9e2ef; background: rgba(9, 20, 35, .82); border-radius: 4px;
+    padding: 4px 9px; font: 12px "Segoe UI", "Microsoft YaHei", sans-serif;
+  }
+  #tracking-status[data-state="locked"] { color: #8fe0b4; }
+  /* 侧栏收回时右上角提示一并隐藏（applyCollapse 切换 body.sidebar-collapsed） */
+  body.sidebar-collapsed #tracking-status { display: none; }
+  /* 地图菜单：锚定在侧边栏头部下方（打开时由 JS 按按钮位置精确定位） */
+  #map-menu {
+    position: fixed; top: 56px; left: 5px; z-index: 210; width: 560px; max-height: 80vh; overflow: auto;
+    background: rgba(20, 20, 24, 0.97); border: 1px solid #333; border-radius: 8px; padding: 6px;
+    pointer-events: auto; display: none;
+  }
+  #map-menu.open { display: block; }
+  #map-menu .map-lock {
+    font-size: 12px; line-height: 1.6; color: var(--hud-accent);
+    padding: 6px 8px; border-bottom: 1px solid #26262b;
+  }
+  /* 开启功能前的确认卡：与 #map-menu 同为左上固定卡，
+     区域计入穿透判定（共享 .am-* 内部样式） */
+  :is(#am-confirm, #cap-confirm, #ns-confirm) {
+    position: fixed; top: 120px; left: 5px; z-index: 220; width: 392px;
+    background: rgba(20, 20, 24, 0.97); border: 1px solid #333; border-radius: 8px;
+    padding: 14px 14px 12px; pointer-events: auto; display: none;
+  }
+  :is(#am-confirm, #cap-confirm, #ns-confirm).open { display: block; }
+  :is(#am-confirm, #cap-confirm, #ns-confirm) .am-title { font-size: 14px; font-weight: 600; color: #fff; margin-bottom: 8px; }
+  :is(#am-confirm, #cap-confirm, #ns-confirm) .am-text { font-size: 13px; line-height: 1.7; color: #cfd3da; }
+  :is(#am-confirm, #cap-confirm, #ns-confirm) .am-btns { display: flex; gap: 8px; margin-top: 12px; }
+  :is(#am-confirm, #cap-confirm, #ns-confirm) .am-btn {
+    flex: 1; padding: 8px 0; border-radius: 6px; border: 1px solid #3a3f47; background: #23262c;
+    color: #cfd3da; font-size: 13px; cursor: pointer;
+  }
+  :is(#am-confirm, #cap-confirm, #ns-confirm) .am-btn:hover { background: #2a2e36; }
+  :is(#am-confirm, #cap-confirm, #ns-confirm) .am-ok { border-color: rgba(var(--hud-accent-rgb), .55); color: var(--hud-accent); }
+  :is(#am-confirm, #cap-confirm, #ns-confirm) .am-ok:hover { background: #1a2331; }
+  .map-row { display: flex; align-items: center; gap: 8px; padding: 6px 4px; border-bottom: 1px solid #26262b; }
+  .map-row:last-child { border-bottom: none; }
+  .map-row img.map-thumb { width: 88px; height: 50px; object-fit: cover; border-radius: 4px; background: #000; }
+  .map-row .map-name { color: #f2f2f2; font-size: 15px; font-weight: 700; width: 110px; }
+  .mode-btn {
+    background: #1677ff; color: #fff; border: none; border-radius: 4px; padding: 5px 12px;
+    font-size: 13px; cursor: pointer; letter-spacing: 4px;
+  }
+  .mode-btn.current { outline: 2px solid #ffc53d; }
+  .mode-btn:disabled { background: #555; cursor: not-allowed; }
+  /* ant-collapse 折叠态（本地自管） */
+  .ant-collapse-content-hidden { display: none; }
+  /* 弹窗关闭按钮（全屏查看） */
+  .popover-close {
+    position: absolute; top: 4px; right: 8px; cursor: pointer; color: #999; font-size: 14px; z-index: 2;
+  }
+  .popover-close:hover { color: #fff; }
+  /* 详情卡片轮播（补齐 antd carousel/slick 基础布局；箭头使用 custom-slick-arrow 样式规则） */
+  .img-item .slick-slider { position: relative; display: block; }
+  .img-item .slick-list { position: relative; display: block; overflow: hidden; margin: 0; padding: 0; }
+  .img-item .slick-track { position: relative; top: 0; left: 0; display: block; }
+  .img-item .slick-slide { float: none; display: block; height: auto; min-height: 1px; }
+  .img-item .slick-slide img, .img-item .slick-slide video { margin: 0 auto; }
+  .img-item .slick-arrow { position: absolute; display: flex; align-items: center; justify-content: center; border: none; background: transparent; padding: 0; cursor: pointer; }
+  .img-item .slick-arrow svg { width: 1em; height: 1em; }
+  .img-item .slick-dots { position: absolute; top: 0; bottom: auto; display: flex; justify-content: center; width: 100%; margin: 0; padding: 0 8px; list-style: none; text-align: center; line-height: 0; height: 8px; align-items: center; }
+  .img-item .slick-dots li { position: relative; display: inline-block; width: 16px; height: 8px; margin: 0 2px; padding: 0; text-align: center; cursor: pointer; }
+  .img-item .slick-dots li button { display: block; width: 16px; height: 4px; padding: 0; color: transparent; font-size: 0; background: #fff; border: 0; outline: none; border-radius: 2px; cursor: pointer; opacity: .3; transition: all .5s; }
+  .img-item .slick-dots li button:hover, .img-item .slick-dots li button:focus { opacity: .75; }
+  .img-item .slick-dots li.slick-active button { width: 24px; background: #fff; opacity: 1; }
+  /* 局内任务 popover：点击侧栏行在下方展开列表，样式沿用战术 HUD 主题 */
+  .sb-task-anchor { position: relative; }
+  .sb-task-anchor.open .sb-btn { border-color: rgba(var(--hud-accent-rgb), .6); color: var(--hud-accent); }
+  #task-pop {
+    position: absolute; left: 13px; right: 13px; top: calc(100% + 2px); z-index: 70;
+    display: none; padding: 6px 5px; max-height: min(62vh, 560px); overflow: auto;
+    background: var(--hud-panel-2); border: 1px solid var(--hud-stroke-strong); border-radius: 8px;
+    box-shadow: 0 12px 32px rgba(0, 0, 0, .55);
+  }
+  .sb-task-anchor.open #task-pop { display: block; }
+  #task-pop .tp-head {
+    display: flex; align-items: center; justify-content: space-between; gap: 8px;
+    padding: 5px 11px 6px; border-bottom: 1px solid var(--hud-stroke);
+    font: 600 10px/1 Consolas, monospace; letter-spacing: .18em; color: var(--hud-ink-faint);
+  }
+  #task-pop .tp-item {
+    margin: 5px 1px 4px; padding: 7px 9px 8px; border: 1px solid var(--hud-stroke); border-radius: 6px;
+    background: linear-gradient(180deg, rgba(151, 183, 222, .05), transparent);
+  }
+  #task-pop .tp-name { font-size: 12.5px; font-weight: 600; color: var(--hud-ink); letter-spacing: .02em; }
+  #task-pop .tp-line { display: flex; align-items: center; gap: 9px; margin-top: 6px; }
+  #task-pop .tp-bar { flex: 1; height: 6px; border-radius: 3px; background: rgba(151, 183, 222, .15); overflow: hidden; }
+  /* 进度条统一为项目青色（同地图标记圈/路线），概率越高越亮 */
+  #task-pop .tp-bar i { display: block; height: 100%; border-radius: 3px;
+    background: linear-gradient(90deg, rgba(var(--hud-cyan-rgb), .3), var(--hud-cyan));
+    box-shadow: 0 0 8px rgba(var(--hud-cyan-rgb), .45); }
+  #task-pop .tp-odds { flex: none; min-width: 3em; text-align: right; font-size: 11px; color: var(--hud-ink-dim); white-space: nowrap; }
+  #task-pop .tp-odds.k-gu { color: #ff7a70; font-weight: 700; }
+  #task-pop .tp-odds.k-yc { color: var(--hud-ink-faint); }
+  #task-pop .tp-empty { padding: 10px 6px; font-size: 12px; color: var(--hud-ink-faint); text-align: center; }
+
+  /* ===== 主题「战术 HUD」：侧边栏 / 点位徽章 / 线条 ===== */
+  :root{
+    /* 分辨率自适应基准之外还有个入口见 uiZoom()：侧栏/HUD 以 2K（窗口高 1440）为设计
+       基准，窗口更矮时整体等比缩小（1080p 恰为 0.75），2K 及以上保持 1 不变。
+       zoom 的语义（已实测）：百分比尺寸/定位仍按视觉占比解析，绝对像素被乘算——
+       因此 JS 设 px 坐标的地方（toggleMapMenu）必须除以 uiZoom() 补偿 */
+    --ui-zoom: 1;
+    --hud-panel:rgba(13,18,26,.93);
+    --hud-panel-2:rgba(18,24,34,.96);
+    --hud-stroke:rgba(151,183,222,.16);
+    --hud-stroke-strong:rgba(151,183,222,.32);
+    --hud-ink:#e9f0f8; --hud-ink-dim:#9fb0c3; --hud-ink-faint:#66788c;
+    --hud-accent:#ffb454; --hud-accent-rgb:255,180,84;
+    --hud-cyan:#45c8ff; --hud-cyan-rgb:69,200,255;
+    --hud-cut:polygon(0 0,calc(100% - 16px) 0,100% 16px,100% 100%,16px 100%,0 calc(100% - 16px));
+  }
+  /* -- 分辨率自适应：侧栏、侧栏锚定的地图菜单与两处 HUD 提示一起缩放；
+       #task-pop / #map-menu 弹层随宿主或独立跟随该比例 -- */
+  #sidebar, #map-menu, #tracking-status, #am-confirm, #cap-confirm, #ns-confirm{zoom:var(--ui-zoom)}
+  /* -- 侧边栏：烟熏玻璃 + 切角面板 -- */
+  #sidebar .sb-frame{height:100%;padding:1px;clip-path:var(--hud-cut);
+    background:linear-gradient(160deg,rgba(151,183,222,.40),rgba(151,183,222,.12) 30%,rgba(151,183,222,.07) 70%,rgba(151,183,222,.26))}
+  /* 注意：透明窗口上禁用 backdrop-filter（Chromium 合成 bug 会导致整页不绘制），玻璃感由高不透明底色承担 */
+  #sidebar .left-menu{background:var(--hud-panel);clip-path:var(--hud-cut);display:flex;flex-direction:column;overflow:hidden;padding:0}
+  /* 把手中心位于 170px，使用 translateY(-50%) 居中；
+     折叠态悬停命中区读把手自身 rect（updateInteraction），改这里无需再改 JS */
+  #sidebar .toggle-btn{background:var(--hud-panel-2);border-color:var(--hud-stroke);color:var(--hud-accent);top:170px}
+  #sidebar .toggle-btn:hover{background:#1a2331;border-color:rgba(var(--hud-accent-rgb),.6)}
+  #sidebar .sb-head{padding:11px 13px 9px;border-bottom:1px solid var(--hud-stroke);
+    background:linear-gradient(180deg,rgba(var(--hud-accent-rgb),.07),transparent);flex:none}
+  /* 头部行 = 切换地图触发器（点击弹出 #map-menu；右侧自动换图/地标开关独立，阻止冒泡）。
+     同一行装下地图名+模式+切换+两组开关，间距收紧，地图名超长时省略号收缩 */
+  #sidebar .sb-head-row{display:flex;align-items:center;gap:7px;cursor:pointer;user-select:none}
+  #sidebar .sb-head-row:hover .sb-map{color:#fff;text-shadow:0 0 10px rgba(var(--hud-accent-rgb),.35)}
+  #sidebar .sb-map{font-size:15px;font-weight:700;color:var(--hud-ink);letter-spacing:.03em;white-space:nowrap;
+    min-width:0;overflow:hidden;text-overflow:ellipsis}
+  #sidebar .sb-mode{font:700 10.5px/16px Consolas,monospace;letter-spacing:.16em;color:var(--hud-accent);
+    border:1px solid rgba(var(--hud-accent-rgb),.55);border-radius:4px;padding:0 6px;white-space:nowrap}
+  #sidebar .sb-map-sw{font:700 10.5px/16px Consolas,monospace;letter-spacing:.12em;color:var(--hud-cyan);
+    border:1px solid rgba(var(--hud-cyan-rgb),.45);border-radius:4px;padding:0 6px;white-space:nowrap;flex:none;transition:.18s}
+  #sidebar .sb-map-sw::after{content:'▾';display:inline-block;margin-left:4px;transition:.18s}
+  #sidebar .sb-head-row.menu-open .sb-map-sw{color:var(--hud-accent);border-color:rgba(var(--hud-accent-rgb),.65)}
+  #sidebar .sb-head-row.menu-open .sb-map-sw::after{transform:rotate(180deg)}
+  #sidebar .sb-sp{flex:1}
+  #sidebar .sb-sw-label{font-size:12px;color:var(--hud-ink-dim);cursor:pointer;user-select:none}
+  #sidebar .sb-sw{width:34px;height:18px;border-radius:4px;border:1px solid var(--hud-stroke-strong);
+    background:rgba(255,255,255,.05);position:relative;cursor:pointer;flex:none}
+  #sidebar .sb-sw::after{content:'';position:absolute;top:2px;left:2px;width:12px;height:12px;border-radius:3px;
+    background:#8fa0b3;transition:.18s}
+  #sidebar .sb-sw.on{background:rgba(var(--hud-accent-rgb),.16);border-color:rgba(var(--hud-accent-rgb),.7)}
+  #sidebar .sb-sw.on::after{left:calc(100% - 14px);background:var(--hud-accent);box-shadow:0 0 8px rgba(var(--hud-accent-rgb),.8)}
+  #sidebar .sb-sw[aria-disabled="true"]{opacity:.45;cursor:not-allowed}
+  #sidebar .sb-row{padding:8px 13px;border-bottom:1px solid var(--hud-stroke);flex:none}
+  #sidebar .sb-ev-none{font-size:12px;color:var(--hud-ink-faint);padding:2px 1px}
+  #sidebar .sb-task{display:flex;align-items:center;gap:8px;font-size:12.5px;color:var(--hud-ink-dim)}
+  #sidebar .sb-task b{color:#ff7a70;font-weight:700;font-family:Consolas,monospace}
+  #sidebar .sb-btn{border:1px solid var(--hud-stroke-strong);background:rgba(255,255,255,.04);color:var(--hud-ink-dim);
+    border-radius:4px;font:600 11px/1 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;padding:4px 9px;cursor:pointer}
+  #sidebar .sb-btn:hover{border-color:rgba(var(--hud-accent-rgb),.6);color:var(--hud-accent)}
+  #sidebar .sb-code-l{font:600 10px/1.4 Consolas,monospace;letter-spacing:.18em;color:var(--hud-ink-faint)}
+  #sidebar .sb-code-l span{display:block;font-size:11px;color:var(--hud-ink-dim);letter-spacing:.06em}
+  /* -- 重要收集页滚动容器 -- */
+  #sidebar .sb-bz-scroll{flex:1;overflow-y:auto;padding:8px 0 4px}
+  #sidebar .sb-bz-scroll::-webkit-scrollbar{width:6px}
+  #sidebar .sb-bz-scroll::-webkit-scrollbar-thumb{background:rgba(151,183,222,.22);border-radius:3px}
+  #sidebar .sb-bz-scroll .sb-row{border-bottom:none}
+  /* -- 重要收集页：长弓溪谷 - 唐吉彩蛋收集品记录卡（琥珀 accent） -- */
+  #sidebar .sb-tj-row{margin-top:8px}
+  #sidebar .sb-tj{border:1px solid rgba(var(--hud-accent-rgb),.32);border-radius:6px;padding:6px 11px 7px;
+    background:linear-gradient(90deg,rgba(var(--hud-accent-rgb),.10),rgba(var(--hud-accent-rgb),.02))}
+  #sidebar .sb-tj.done{border-color:rgba(53,217,127,.45);background:linear-gradient(90deg,rgba(53,217,127,.08),transparent)}
+  #sidebar .sb-tj-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  #sidebar .sb-tj-meta{flex:none;font:700 11px/1.5 Consolas,monospace;color:var(--hud-ink-dim);letter-spacing:.02em}
+  #sidebar .sb-tj-meta b{color:var(--hud-accent);font-size:12.5px}
+  #sidebar .sb-tj.done .sb-tj-meta,#sidebar .sb-tj.done .sb-tj-meta b{color:#35d97f}
+  #sidebar .sb-tj-bar{margin-top:6px;height:4px;border-radius:2px;background:rgba(151,183,222,.14);overflow:hidden}
+  #sidebar .sb-tj-bar i{display:block;height:100%;width:0;border-radius:2px;transition:width .25s;
+    background:var(--hud-accent);box-shadow:0 0 6px rgba(var(--hud-accent-rgb),.5)}
+  #sidebar .sb-tj.done .sb-tj-bar i{background:#35d97f;box-shadow:0 0 6px rgba(53,217,127,.5)}
+  #sidebar .sb-tj-item{display:flex;flex-wrap:wrap;gap:10px;padding:5px 0 4px;margin-top:4px;
+    border-top:1px dashed rgba(151,183,222,.16)}
+  #sidebar .sb-tj-fig{flex:none;width:42px;height:42px;border:1px solid var(--hud-stroke);border-radius:6px;
+    background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;overflow:hidden;
+    position:relative;cursor:pointer}
+  #sidebar .sb-tj-fig img{width:100%;height:100%;object-fit:contain}
+  #sidebar .sb-tj-item.done .sb-tj-fig{border-color:rgba(53,217,127,.6)}
+  #sidebar .sb-tj-item.done .sb-tj-fig::after{content:'✓';position:absolute;top:1px;right:3px;color:#35d97f;
+    font:700 11px/1 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;text-shadow:0 0 5px rgba(53,217,127,.7)}
+  #sidebar .sb-tj-body{flex:1;min-width:0}
+  #sidebar .sb-tj-l1{display:flex;align-items:center;gap:8px}
+  #sidebar .sb-tj-name{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font-size:12px;font-weight:600;color:var(--hud-ink);letter-spacing:.02em;cursor:pointer}
+  #sidebar .sb-tj-name:hover{color:var(--hud-accent)}
+  #sidebar .sb-tj-item.done .sb-tj-name{color:var(--hud-ink-dim)}
+  #sidebar .sb-tj-step{flex:none;display:flex;align-items:center;gap:5px}
+  #sidebar .sb-tj-step button{width:19px;height:19px;border:1px solid var(--hud-stroke);border-radius:4px;
+    background:rgba(255,255,255,.03);color:var(--hud-ink-dim);cursor:pointer;padding:0;line-height:1;
+    font:700 12px/17px Consolas,monospace;transition:all .14s}
+  #sidebar .sb-tj-step button:hover:not(:disabled){border-color:var(--hud-stroke-strong);color:var(--hud-ink)}
+  #sidebar .sb-tj-step button:disabled{opacity:.35;cursor:default}
+  #sidebar .sb-tj-cnt{font:700 11px/1 Consolas,monospace;color:var(--hud-ink)}
+  #sidebar .sb-tj-item.done .sb-tj-cnt{color:#35d97f}
+  #sidebar .sb-tj-l2{display:flex;align-items:center;gap:6px;margin-top:3px}
+  #sidebar .sb-tj-mode{flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;
+    font:500 10.5px/1.4 Consolas,monospace;color:var(--hud-ink-faint)}
+  #sidebar .sb-tj-srcbtn{flex:none}
+  #sidebar .sb-tj-src{display:none;flex:1 1 100%;flex-wrap:wrap;gap:4px;margin-top:-2px;padding-top:5px;
+    border-top:1px dotted rgba(151,183,222,.14)}
+  #sidebar .sb-tj-item.src-open .sb-tj-src{display:flex}
+  #sidebar .sb-tj-box{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--hud-stroke);
+    border-radius:4px;padding:2px 6px 2px 2px;background:rgba(255,255,255,.02)}
+  #sidebar .sb-tj-box img{width:20px;height:20px;object-fit:contain;display:block}
+  #sidebar .sb-tj-box-n{font:600 10.5px/1.3 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    color:var(--hud-ink-dim);white-space:nowrap}
+  #sidebar .sb-tj-box-m{font:600 9px/1.3 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:#ff7a70}
+  #sidebar .sb-tj-note{display:flex;align-items:center;gap:6px;margin-top:6px;padding-top:5px;
+    border-top:1px dashed rgba(151,183,222,.16);font-size:10px;color:var(--hud-ink-faint)}
+  #sidebar .sb-tj-note .sb-sp{flex:1}
+  #sidebar .sb-tj-reset.armed{color:#ff7a70}
+  #sidebar .sb-tj-none{font-size:12px;line-height:1.6;color:var(--hud-ink-faint)}
+  /* -- 关于页：快捷键 / 版本 / 推广 / 作者信息 / 打赏作者 / 想说的话 / 特殊功能 卡 -- */
+  #sidebar .sb-ab-scroll{flex:1;overflow-y:auto;padding:9px 13px 12px}
+  #sidebar .sb-ab-scroll::-webkit-scrollbar{width:6px}
+  #sidebar .sb-ab-scroll::-webkit-scrollbar-thumb{background:rgba(151,183,222,.22);border-radius:3px}
+  #sidebar .sb-ab{border:1px solid var(--hud-stroke);border-radius:6px;padding:6px 11px 9px;
+    background:linear-gradient(180deg,rgba(151,183,222,.05),transparent);margin-bottom:9px}
+  #sidebar .sb-ab-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+  #sidebar .sb-ab-l{font:600 10px/1.4 Consolas,monospace;letter-spacing:.18em;color:var(--hud-ink-faint)}
+  #sidebar .sb-ab-l span{display:block;font-size:11px;color:var(--hud-ink-dim);letter-spacing:.06em;
+    font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  #sidebar .sb-ab-row{display:flex;align-items:center;justify-content:space-between;gap:10px;
+    padding:6px 0 4px;margin-top:5px;border-top:1px dashed rgba(151,183,222,.16)}
+  #sidebar .sb-ab-k{flex:none;font-size:12px;color:var(--hud-ink-dim)}
+  #sidebar .sb-ab-v{font:700 13px/1.2 Consolas,monospace;color:var(--hud-ink);letter-spacing:.04em;
+    min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;text-align:right}
+  #sidebar .sb-ab-v.txt{font:500 12px/1.4 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    letter-spacing:0;white-space:normal;word-break:break-all;display:-webkit-box}
+  #sidebar .sb-ab-v.ok{color:#35d97f}
+  #sidebar .sb-ab-v.new{color:var(--hud-accent)}
+  #sidebar .sb-ab-v.err{color:#ff7a70;font-family:-apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  #sidebar .sb-ab-key{min-width:0;text-align:right}
+  #sidebar .sb-ab-link{color:var(--hud-cyan);cursor:pointer;transition:color .15s,opacity .15s}
+  #sidebar .sb-ab-link:hover,#sidebar .sb-ab-link:focus-visible{color:#7fd8ff;text-decoration:underline;outline:none}
+  #sidebar .sb-ab-p{font-size:12px;line-height:1.75;color:var(--hud-ink-dim);margin-top:6px;
+    padding-top:5px;border-top:1px dashed rgba(151,183,222,.16);text-align:justify}
+  #sidebar .sb-ab-p:first-of-type{border-top:none;margin-top:2px;padding-top:2px}
+  #sidebar .sb-ab-qr{width:152px;height:152px;margin:8px auto 0;border:1px solid var(--hud-stroke);
+    border-radius:8px;background:rgba(255,255,255,.04);display:flex;align-items:center;justify-content:center;overflow:hidden}
+  #sidebar .sb-ab-qr img{width:100%;height:100%;object-fit:contain;padding:5px}
+  #sidebar .sb-ab-qr .sb-ab-qr-ph{width:100%;height:100%;display:flex;align-items:center;justify-content:center;
+    border:1px dashed rgba(151,183,222,.3);border-radius:6px;margin:9px;font-size:11px;color:var(--hud-ink-faint);
+    text-align:center;line-height:1.6}
+  #sidebar .sb-chips-head{display:flex;align-items:center;gap:6px;margin-bottom:7px}
+  #sidebar .sb-chips-title{flex:1;font:600 10px/1 Consolas,monospace;letter-spacing:.18em;color:var(--hud-ink-faint)}
+  #sidebar .sb-txtbtn{background:none;border:none;color:var(--hud-ink-faint);cursor:pointer;padding:1px 4px;
+    font:600 11px -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  #sidebar .sb-txtbtn:hover{color:var(--hud-accent)}
+  #sidebar .sb-chips{display:flex;flex-wrap:wrap;gap:5px}
+  #sidebar .sb-chip{display:inline-flex;align-items:center;gap:6px;padding:3px 8px;border-radius:5px;cursor:pointer;
+    user-select:none;border:1px solid var(--hud-stroke);color:var(--hud-ink-faint);background:rgba(255,255,255,.02);
+    font:600 11.5px/1.35 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;transition:all .15s}
+  #sidebar .sb-chip-dot{width:7px;height:7px;border-radius:2px;background:var(--cc);opacity:.45;flex:none}
+  #sidebar .sb-chip:hover{border-color:var(--hud-stroke-strong);color:var(--hud-ink-dim)}
+  #sidebar .sb-chip.on{color:var(--hud-ink);border-color:rgba(var(--cc-rgb),.6);background:rgba(var(--cc-rgb),.10)}
+  #sidebar .sb-chip.on .sb-chip-dot{opacity:1;box-shadow:0 0 7px rgba(var(--cc-rgb),.9)}
+  #sidebar .sb-chip.k-open{--cc:#35d97f;--cc-rgb:53,217,127}
+  #sidebar .sb-chip.k-random{--cc:#45c8ff;--cc-rgb:69,200,255}
+  #sidebar .sb-chip.k-card{--cc:#ffd35c;--cc-rgb:255,211,92}
+  #sidebar .sb-chip.k-task{--cc:#ff9143;--cc-rgb:255,145,67}
+  #sidebar .sb-chip.k-event{--cc:#ffb454;--cc-rgb:255,180,84}
+  #sidebar .sb-chip.k-floor{--cc:#3ddad0;--cc-rgb:61,218,208}
+  #sidebar .sb-chip.k-special{--cc:#b98cff;--cc-rgb:185,140,255}
+  #sidebar .sb-chip.k-az3my{--cc:#ff5d5d;--cc-rgb:255,93,93}
+  #sidebar .sb-chip.k-del{--cc:#93a0b0;--cc-rgb:147,160,176}
+  #sidebar .sb-scroll{flex:1;overflow-y:auto;padding:4px 8px 10px}
+  #sidebar .sb-scroll::-webkit-scrollbar{width:6px}
+  #sidebar .sb-scroll::-webkit-scrollbar-thumb{background:rgba(151,183,222,.22);border-radius:3px}
+  #sidebar .sb-scroll::-webkit-scrollbar-thumb:hover{background:rgba(151,183,222,.4)}
+  #sidebar .sb-grp{margin-bottom:3px}
+  #sidebar .sb-grp-h{display:flex;align-items:center;gap:8px;padding:7px 9px;cursor:pointer;border-radius:6px;
+    border-left:2px solid transparent;user-select:none}
+  #sidebar .sb-grp-h:hover{background:rgba(255,255,255,.035)}
+  #sidebar .sb-grp.open .sb-grp-h{border-left-color:var(--hud-accent);
+    background:linear-gradient(90deg,rgba(var(--hud-accent-rgb),.08),transparent 70%)}
+  #sidebar .sb-grp-ic{width:14px;height:14px;color:var(--hud-ink-faint);display:inline-flex;flex:none}
+  #sidebar .sb-grp-ic svg{width:100%;height:100%}
+  #sidebar .sb-grp.open .sb-grp-ic{color:var(--hud-accent)}
+  #sidebar .sb-grp-name{font-size:13px;font-weight:700;color:var(--hud-ink-dim);flex:1;
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+  #sidebar .sb-grp.open .sb-grp-name{color:var(--hud-ink)}
+  #sidebar .sb-grp-cnt{font:700 10.5px/15px Consolas,monospace;color:var(--hud-ink);background:rgba(255,255,255,.06);
+    border:1px solid var(--hud-stroke);border-radius:4px;padding:0 5px}
+  #sidebar .sb-grp-mini{display:flex;gap:2px;opacity:0;transition:opacity .15s}
+  #sidebar .sb-grp-h:hover .sb-grp-mini{opacity:1}
+  #sidebar .sb-grp-chev{width:12px;height:12px;color:var(--hud-ink-faint);transition:transform .2s;flex:none}
+  #sidebar .sb-grp.open .sb-grp-chev{transform:rotate(90deg);color:var(--hud-accent)}
+  #sidebar .sb-grp-body{display:none;padding:2px 4px 8px}
+  #sidebar .sb-grp.open .sb-grp-body{display:block}
+  #sidebar .sb-tiles{display:grid;grid-template-columns:repeat(5,1fr);gap:5px}
+  #sidebar .sb-tile{position:relative;border:1px solid var(--hud-stroke);border-radius:8px;background:rgba(255,255,255,.02);
+    padding:4px 4px 2px;cursor:pointer;transition:all .15s;display:flex;flex-direction:column}
+  #sidebar .sb-tile:hover{border-color:var(--hud-stroke-strong);transform:translateY(-1px)}
+  #sidebar .sb-tile.on{border-color:rgba(var(--hud-accent-rgb),.65);background:rgba(var(--hud-accent-rgb),.08)}
+  #sidebar .sb-tile.on::after{content:'';position:absolute;top:3px;right:3px;width:8px;height:8px;
+    border-top:2px solid var(--hud-accent);border-right:2px solid var(--hud-accent);border-radius:0 4px 0 0}
+  #sidebar .sb-t-img{width:100%;aspect-ratio:1;object-fit:contain;display:block}
+  #sidebar .sb-t-name{font-size:9.5px;color:var(--hud-ink-dim);text-align:center;white-space:nowrap;
+    overflow:hidden;text-overflow:ellipsis;padding:2px 0 1px}
+  #sidebar .sb-tile.on .sb-t-name{color:var(--hud-ink)}
+  #sidebar .sb-t-cnt{position:absolute;top:3px;left:3px;font:700 9.5px/13px Consolas,monospace;color:var(--hud-ink);
+    background:rgba(12,18,25,.85);border:1px solid var(--hud-stroke-strong);border-radius:4px;padding:0 3px;z-index:1}
+  #sidebar .sb-t-ex{position:absolute;bottom:15px;right:3px;color:#fff;border-radius:3px;padding:0 3px;z-index:1;
+    font:700 9px/12px -apple-system,"Segoe UI","Microsoft YaHei",sans-serif}
+  /* -- 侧栏顶栏：北京时间（功能页 Tab 之上；日期暗/时间亮，Consolas 等宽秒位不跳
+       动）+ 左侧常驻退出按钮（绝对定位不参与居中流，完全退出应用） -- */
+  #sidebar .sb-clock{flex:none;display:flex;align-items:center;justify-content:center;position:relative;
+    padding:8px 11px 7px;border-bottom:1px solid var(--hud-stroke);
+    background:linear-gradient(180deg,rgba(var(--hud-cyan-rgb),.06),transparent);
+    font:600 12px/1 Consolas,monospace;letter-spacing:.06em;color:var(--hud-ink-dim);
+    white-space:nowrap;font-variant-numeric:tabular-nums}
+  #sidebar .sb-clock-t{display:flex;align-items:baseline;justify-content:center;gap:7px}
+  #sidebar .sb-clock b{font:700 13.5px/1 Consolas,monospace;letter-spacing:.1em;
+    color:var(--hud-ink);text-shadow:0 0 10px rgba(var(--hud-cyan-rgb),.25)}
+  /* 退出按钮常显对比色红（深色 HUD 上的警示色），悬停加深填充 */
+  #sidebar .sb-quit{position:absolute;left:6px;top:50%;transform:translateY(-50%);width:20px;height:20px;
+    display:inline-flex;align-items:center;justify-content:center;padding:0;
+    border:1px solid rgba(255,122,112,.55);border-radius:5px;background:rgba(255,122,112,.1);
+    color:#ff7a70;cursor:pointer;font:700 11px/1 Consolas,monospace;transition:all .15s}
+  #sidebar .sb-quit:hover{color:#ffb0a8;border-color:rgba(255,122,112,.9);background:rgba(255,122,112,.25)}
+  /* -- 侧栏顶部功能页 Tab：地图工具 / 重要收集 / 阿萨拉记牌器 / 关于。
+       按内容伸展（六个字的记牌器页签在等宽 flex 下会折行），多余空间均分 */
+  #sidebar .sb-tabs{display:flex;gap:5px;padding:9px 11px 8px;border-bottom:1px solid var(--hud-stroke);
+    background:linear-gradient(180deg,rgba(var(--hud-accent-rgb),.06),transparent);flex:none}
+  #sidebar .sb-tab{flex:1 1 auto;min-width:0;display:flex;align-items:center;justify-content:center;gap:6px;
+    border:1px solid var(--hud-stroke);background:rgba(255,255,255,.03);color:var(--hud-ink-dim);
+    border-radius:5px;padding:7px 4px;font:600 12.5px/1 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    letter-spacing:.05em;cursor:pointer;transition:all .15s;white-space:nowrap}
+  #sidebar .sb-tab:hover{border-color:var(--hud-stroke-strong);color:var(--hud-ink)}
+  #sidebar .sb-tab.on{color:var(--hud-accent);border-color:rgba(var(--hud-accent-rgb),.7);
+    background:rgba(var(--hud-accent-rgb),.1);box-shadow:inset 0 0 12px rgba(var(--hud-accent-rgb),.08)}
+  #sidebar .sb-tab-ic{width:13px;height:13px;display:inline-flex;flex:none}
+  #sidebar .sb-tab-ic svg{width:100%;height:100%}
+  /* -- 阿萨拉记牌器页（卡牌稀有度配色：2~10 绿 / JQK 蓝 / A 紫 / 小王金 / 大王红） -- */
+  #sidebar .pk-head{flex:none}
+  #sidebar .pk-title-row{display:flex;align-items:baseline;gap:9px}
+  #sidebar .pk-title{font-size:14.5px;font-weight:700;color:var(--hud-ink);letter-spacing:.03em}
+  #sidebar .pk-count{margin-left:auto;font:700 12px/1 Consolas,monospace;color:var(--hud-ink-dim)}
+  #sidebar .pk-count b{color:var(--hud-cyan);font-size:14px}
+  #sidebar .pk-bar{margin-top:8px;height:7px;border-radius:4px;background:rgba(151,183,222,.14);overflow:hidden}
+  #sidebar .pk-bar i{display:block;height:100%;width:0;border-radius:4px;transition:width .25s;
+    background:linear-gradient(90deg,rgba(var(--hud-cyan-rgb),.35),var(--hud-cyan));
+    box-shadow:0 0 8px rgba(var(--hud-cyan-rgb),.5)}
+  #sidebar .pk-tools{display:flex;align-items:center;gap:6px;margin-top:9px}
+  #sidebar .pk-seg{border:1px solid var(--hud-stroke);background:rgba(255,255,255,.03);color:var(--hud-ink-faint);
+    border-radius:4px;padding:4px 10px;font:600 11px/1 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    cursor:pointer;transition:all .15s}
+  #sidebar .pk-seg:hover{border-color:var(--hud-stroke-strong);color:var(--hud-ink-dim)}
+  #sidebar .pk-seg.on{color:var(--hud-cyan);border-color:rgba(var(--hud-cyan-rgb),.6);background:rgba(var(--hud-cyan-rgb),.1)}
+  #sidebar .pk-reset.armed{color:#ff7a70;border-color:rgba(255,122,112,.65);background:rgba(255,122,112,.1)}
+  #sidebar .pk-done{margin:14px 6px;text-align:center;font-size:13px;color:var(--hud-ink);
+    border:1px solid rgba(53,217,127,.4);border-radius:6px;padding:10px;background:rgba(53,217,127,.07)}
+  #sidebar .pk-done span{display:block;font-size:11px;color:var(--hud-ink-faint);margin-top:4px}
+  #sidebar .pk-grp{margin:7px 0 4px}
+  #sidebar .pk-grp-h{display:flex;align-items:center;gap:7px;padding:4px 6px}
+  #sidebar .pk-dot{width:11px;height:11px;border-radius:50%;flex:none;box-shadow:0 0 6px rgba(0,0,0,.4)}
+  #sidebar .pk-rank{font:700 13px/1 Consolas,monospace;color:var(--hud-ink-dim)}
+  #sidebar .pk-grp.done .pk-rank{color:var(--hud-ink)}
+  #sidebar .pk-grp-cnt{margin-left:auto;font:700 10.5px/15px Consolas,monospace;color:var(--hud-ink-faint);
+    border:1px solid var(--hud-stroke);border-radius:4px;padding:0 5px}
+  #sidebar .pk-grp.done .pk-grp-cnt{color:#35d97f;border-color:rgba(53,217,127,.45)}
+  /* 卡片格：4 列，比地图工具的物资 tile（5 列）放大一档；文字带点数（如「梅花3」） */
+  #sidebar .pk-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:5px;padding:2px 4px 5px}
+  #sidebar .pk-card{position:relative;border:1px solid var(--hud-stroke);border-radius:8px;background:rgba(255,255,255,.02);
+    cursor:pointer;transition:all .14s;padding:4px 4px 2px;text-align:center}
+  #sidebar .pk-card:hover{border-color:var(--hud-stroke-strong);transform:translateY(-1px)}
+  #sidebar .pk-card img{width:100%;aspect-ratio:1;object-fit:contain;display:block;filter:brightness(.94)}
+  #sidebar .pk-card-t{display:flex;align-items:center;justify-content:center;gap:3px;padding:2px 0 1px;
+    font:600 10.5px/1.3 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;color:var(--hud-ink-dim);white-space:nowrap}
+  #sidebar .pk-red{color:#ff7a70}
+  #sidebar .pk-card.on{border-color:rgba(var(--hud-accent-rgb),.7);background:rgba(var(--hud-accent-rgb),.07)}
+  #sidebar .pk-card.on img{filter:brightness(1.06)}
+  #sidebar .pk-card.on .pk-card-t{color:var(--hud-ink)}
+  #sidebar .pk-card.on::after{content:'✓';position:absolute;top:2px;right:4px;color:var(--hud-accent);
+    font:700 11px/1 -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;text-shadow:0 0 5px rgba(var(--hud-accent-rgb),.7)}
+  /* -- 点位徽章：性质色描边环 + 深色底 --
+     content 外层容器须清掉 site_external.css 旧版 marker-item-* 的方形色块与细边框，
+     徽章本体只由内层 .marker-item 承担 */
+  #marker-layer .marker-item-content{--cc:#35d97f;--cc-rgb:53,217,127;transition:transform .16s ease;
+    background:transparent;border:none}
+  #marker-layer .marker-item-content.marker-item-random{--cc:#45c8ff;--cc-rgb:69,200,255}
+  #marker-layer .marker-item-content.marker-item-card{--cc:#ffd35c;--cc-rgb:255,211,92}
+  #marker-layer .marker-item-content.marker-item-task{--cc:#ff9143;--cc-rgb:255,145,67}
+  #marker-layer .marker-item-content.marker-item-special{--cc:#b98cff;--cc-rgb:185,140,255}
+  #marker-layer .marker-item-content.marker-item-az3my{--cc:#ff5d5d;--cc-rgb:255,93,93}
+  #marker-layer .marker-item-content.marker-item-del{--cc:#93a0b0;--cc-rgb:147,160,176}
+  #marker-layer .marker-item{background:rgba(10,15,22,.80);border:4px solid var(--cc);border-radius:21px;
+    box-shadow:0 4px 18px rgba(0,0,0,.55),0 0 0 2px rgba(0,0,0,.35),0 0 18px rgba(var(--cc-rgb),.22)}
+  #marker-layer .marker-item .marker-img{display:block;filter:drop-shadow(0 2px 4px rgba(0,0,0,.6))}
+  /* del 类挂在 content 外层，虚线环与灰阶要落到内层徽章上（marker-item-del 是 content 的修饰类） */
+  #marker-layer .marker-item-del .marker-item{border-style:dashed;background:rgba(13,17,22,.55)}
+  #marker-layer .marker-item-del .marker-img{filter:grayscale(1) brightness(.8)}
+  #marker-layer .marker-count{top:auto;right:-14px;bottom:-12px;min-width:30px;height:30px;padding:0 7px;
+    text-align:center;background:#0c1219;border:3px solid rgba(var(--cc-rgb),.9);border-radius:9px;
+    color:#fff;font:700 17px/26px -apple-system,"Segoe UI","Microsoft YaHei",sans-serif;
+    box-shadow:0 2px 8px rgba(0,0,0,.55);text-shadow:none}
+  #marker-layer .marker-item-tips{position:absolute;width:auto;top:auto;bottom:calc(100% + 14px);left:50%;
+    transform:translateX(-50%);white-space:nowrap;color:#dce8f4;font-size:17px;font-weight:500;
+    background:rgba(9,13,19,.9);border:1.5px solid rgba(var(--cc-rgb),.35);border-left:5px solid var(--cc);
+    border-radius:5px;padding:7px 12px;box-shadow:0 2px 12px rgba(0,0,0,.5)}
+  #marker-layer .marker-item-tips::after{content:'';position:absolute;top:100%;left:50%;transform:translateX(-50%);
+    border:7px solid transparent;border-top-color:rgba(var(--cc-rgb),.35)}
+  /* -- 线条：双层辉光（端点不加标记，由路线圆头端衔接点位徽章）；区域圈旋转刻度；事件圈琥珀脉冲 -- */
+  #world-svg .route-glow{fill:none;stroke:rgba(var(--hud-cyan-rgb),.14);stroke-width:34px;
+    stroke-linecap:round;stroke-linejoin:round}
+  #world-svg .route-path{stroke:var(--hud-cyan);stroke-width:10px;stroke-dasharray:46px 30px;
+    stroke-linecap:round;stroke-linejoin:round;fill:none;
+    filter:drop-shadow(0 0 16px rgba(var(--hud-cyan-rgb),.6));animation:hud-flow 1.15s linear infinite}
+  @keyframes hud-flow{to{stroke-dashoffset:-76px}}
+  #world-svg .ring-area{fill:rgba(var(--hud-cyan-rgb),.05);stroke:rgba(var(--hud-cyan-rgb),.85);stroke-width:4px;
+    stroke-dasharray:16px 22px;transform-box:fill-box;transform-origin:center;animation:hud-spin 26s linear infinite}
+  #world-svg .ring-cross{fill:none;stroke:rgba(var(--hud-cyan-rgb),.9);stroke-width:4px}
+  #world-svg .ring-event{fill:rgba(var(--hud-accent-rgb),.06);stroke:rgba(var(--hud-accent-rgb),.95);stroke-width:5px;
+    stroke-dasharray:12px 18px;transform-box:fill-box;transform-origin:center;animation:hud-pulse 2.6s ease-in-out infinite}
+  #world-svg .ring-event-dot{fill:var(--hud-accent)}
+  @keyframes hud-spin{to{transform:rotate(360deg)}}
+  @keyframes hud-pulse{0%,100%{opacity:.45}50%{opacity:1}}
+</style>
+</head>
+<body class="tracking-unlocked">
+  <div id="maproot" class="map-container select-none" data-v-39982a9c>
+    <svg width="0" height="0" aria-hidden="true" style="position:absolute;pointer-events:none">
+      <defs>
+        <mask id="ns-panel-mask" maskUnits="objectBoundingBox" maskContentUnits="objectBoundingBox"
+              x="0" y="0" width="1" height="1" style="mask-type:luminance">
+          <rect x="0" y="0" width="1" height="1" fill="white" />
+          <g id="ns-panel-holes"></g>
+        </mask>
+      </defs>
+    </svg>
+    <div id="ns-clip"><div id="tile-layer"></div></div>
+    <div class="map-tile" data-v-39982a9c></div>
+    <svg id="world-svg" data-v-39982a9c width="4096" height="4096"></svg>
+    <div id="label-layer" class="label-layer" data-v-39982a9c></div>
+    <div id="marker-layer" data-v-39982a9c></div>
+    <div id="popup-layer"></div>
+  </div>
+
+  <div id="tracking-status" role="status">正在准备地图定位…</div>
+  <div id="map-menu"></div>
+  <div id="am-confirm" role="alertdialog" aria-modal="true" aria-labelledby="am-title">
+    <div class="am-title" id="am-title">开启自动换图</div>
+    <div class="am-text">开启【自动换图】后需要打开地图，等待识别成功后才会自动换图，在显示物资点时也偶尔会出现2~5秒延迟，请知悉。</div>
+    <div class="am-btns">
+      <button type="button" class="am-btn am-cancel">取消</button>
+      <button type="button" class="am-btn am-ok">确定</button>
+    </div>
+  </div>
+  <div id="cap-confirm" role="alertdialog" aria-modal="true" aria-labelledby="cap-title">
+    <div class="am-title" id="cap-title">开启直播/录屏模式</div>
+    <div class="am-text">开启【直播/录屏模式】将使得本窗口和点位在直播/录屏画面中不可见（不可捕获），除此之外不影响任何功能使用。</div>
+    <div class="am-btns">
+      <button type="button" class="am-btn am-cancel">取消</button>
+      <button type="button" class="am-btn am-ok">确定</button>
+    </div>
+  </div>
+  <div id="ns-confirm" role="alertdialog" aria-modal="true" aria-labelledby="ns-title">
+    <div class="am-title" id="ns-title">开启无信号临时地图</div>
+    <div class="am-text">进入无信号区域后打开地图以25%透明度显示游戏地图</div>
+    <div class="am-btns">
+      <button type="button" class="am-btn am-cancel">取消</button>
+      <button type="button" class="am-btn am-ok">确定</button>
+    </div>
+  </div>
+  <div id="sidebar-root"></div>
+
+<script src="data/data.js"></script>
+<script src="data/cxjy_floors.js"></script>
+<script>
+'use strict';
+const D = window.__DATA__;
+/* 楼层配置（潮汐监狱本地临时方案，官方数据）：瓦片 images/dfmap/cxjy/map/f1..f4/，
+   点位 floor 字段 1..3。 */
+const FLOORS = window.__CXJY_FLOORS__ || null;
+const floorsOf = (map) => (FLOORS && FLOORS.map === map && Array.isArray(FLOORS.floors) ? FLOORS.floors : null);
+/* 潮汐监狱已包含本地瓦片与点位；这里放开菜单交互，保留 mapConf 中的 disabled 字段。 */
+const LOCAL_MODE_UNLOCK = { cxjy: true };
+const GROUP_ORDER = ['lt', 'fish', 'b_asl', 'b_hfk', 'goods', 'other']; // 分组顺序（fish=钓鱼）
+const CHIP_ORDER = ['open', 'random', 'card', 'task', 'az3my', 'special']; // 筛选顺序（已删除不提供筛选项）
+const OD = 'data-v-635d2694';   // 侧边栏 scoped id
+/* 打包态运行时下载资产（赞助二维码）位于 app.asar.unpacked，asar 相对路径
+   对归档外新文件不回退，须用 preload 注入的绝对 URL 前缀；开发态空串即相对路径。 */
+const ASSETS = (window.overlay && window.overlay.runtime && window.overlay.runtime.assetsDir) || '';
+const OM = 'data-v-39982a9c';   // 地图 scoped id
+const OP = 'data-v-4c5cbd99';   // 弹窗图片 scoped id
+const $ = (s) => document.querySelector(s);
+
+/* ---------- 状态 ---------- */
+const state = {
+  map: 'cgxg',
+  mode: 'pt',
+  floor: null,           // 楼层 key（f1..f4，null=全景/基础层；仅限有楼层配置的地图，会话内有效）
+  activeCats: new Set(),
+  catsByMode: {},       // 分类勾选按（地图+难度）分槽记忆：key = map/mode → 勾选的分类 id 数组
+  // 性质筛选默认全选（含按地图生效的 az3my 需要密钥），仅排除已隐藏的「已删除」
+  checkedClasses: new Set(Object.keys(D.chips).filter(c => c !== 'del')),
+  labelsOn: false,
+  desktopCapture: false, // 桌面采集开启时，直播/录屏模式强制开启且锁定。
+  streamHide: false,    // 直播/录屏模式（关于页开关）：true = 本窗口与点位对直播/录屏
+                        // 画面不可见（恒排除捕获）；开启前弹确认卡，见 #cap-confirm
+  autoMap: false,        // 自动换图：识别到对局地图时自动切换（默认关闭：换图探测偶尔引入
+                         // 2~5 秒点位延迟；用户开启前弹窗告知，见 #am-confirm）
+  nosignalMap: true,     // 无信号临时地图仅控制瓦片底图显隐（默认开启、持久化）。
+                         // 无信号识别、固定视野配准和物资点不受此显示选项影响。
+  events: [],            // 选中的特殊事件 key（多选；切换地图时清空）
+  eventManualAt: {},     // 手动点击各事件 chip 的时间戳（自动识别的宽限期基准）
+  sidebarCollapsed: false,
+  tasksOpen: false,      // 局内任务列表展开态（仅会话内有效，不持久化）
+  sidebarTab: 'map',     // 侧栏功能页：map=地图工具 / collect=重要收集 / poker=阿萨拉记牌器 / about=关于
+  pokerMode: 'all',      // 记牌器视图：all=全部（按点数分组）/ miss=未收集
+};
+try {
+  const saved = JSON.parse(localStorage.getItem('deltabox_state') || '{}');
+  if (saved.map && D.maps[saved.map]) state.map = saved.map;
+  if (saved.mode) state.mode = saved.mode;
+  if (Array.isArray(saved.activeCats)) state.activeCats = new Set(saved.activeCats);
+  // 分类勾选按（地图+难度）恢复；旧版保存只有扁平 activeCats，迁移为当前 (map,mode) 槽
+  if (saved.catsByMode && typeof saved.catsByMode === 'object')
+    for (const [k, v] of Object.entries(saved.catsByMode))
+      if (Array.isArray(v)) state.catsByMode[k] = v;
+  state.catsByMode[state.map + '/' + state.mode] ??= [...state.activeCats];
+  state.activeCats = new Set(state.catsByMode[state.map + '/' + state.mode] || []);
+  if (Array.isArray(saved.checkedClasses) && saved.checkedClasses.length) state.checkedClasses = new Set(saved.checkedClasses);
+  state.checkedClasses.delete('del');   // 「已删除」筛选项已隐藏，历史勾选一并失效
+  // 旧版默认不含 az3my：保存值与旧默认完全一致 = 从未自定义过 → 迁移到新默认（全选除 del）
+  const LEGACY_DEFAULT = ['open', 'random', 'card', 'task', 'special'];
+  if (LEGACY_DEFAULT.length === state.checkedClasses.size && LEGACY_DEFAULT.every(c => state.checkedClasses.has(c)))
+    state.checkedClasses = new Set(Object.keys(D.chips).filter(c => c !== 'del'));
+  if (typeof saved.labelsOn === 'boolean') state.labelsOn = saved.labelsOn;
+  if (saved.streamHide === true) state.streamHide = true;   // 直播/录屏模式默认关闭
+  state.desktopCapture = saved.desktopCapture === true;
+  if (state.desktopCapture) state.streamHide = true;
+  if (typeof saved.autoMap === 'boolean') state.autoMap = saved.autoMap;
+  if (typeof saved.nosignalMap === 'boolean') state.nosignalMap = saved.nosignalMap;
+  // 侧栏收起态与功能页均不跨启动恢复：每次启动一律展开、并回到「地图工具」页
+  // （persist 不再记录 sidebarTab；会话内切换只改内存态）。
+  if (saved.pokerMode === 'miss') state.pokerMode = 'miss';
+} catch (e) {}
+/* 分类勾选按（地图+难度）记忆：切换前存回当前槽（stashModeCats），切换后恢复新槽
+   （applyModeCats）。persist 落盘整张槽表；空集也是有效状态（该组合不显示任何分类）。 */
+const modeCatsKey = () => state.map + '/' + state.mode;
+function stashModeCats() { state.catsByMode[modeCatsKey()] = [...state.activeCats]; }
+function applyModeCats() { state.activeCats = new Set(state.catsByMode[modeCatsKey()] || []); }
+const persist = () => localStorage.setItem('deltabox_state', JSON.stringify({
+  map: state.map, mode: state.mode, activeCats: [...state.activeCats],
+  catsByMode: state.catsByMode,
+  checkedClasses: [...state.checkedClasses], labelsOn: state.labelsOn,
+  streamHide: state.streamHide, desktopCapture: state.desktopCapture,
+  autoMap: state.autoMap, nosignalMap: state.nosignalMap, sidebarCollapsed: state.sidebarCollapsed,
+  pokerMode: state.pokerMode,
+}));
+
+/* ---------- 视觉定位坐标：直接使用截图测出的连续比例与平移 ---------- */
+const view = { scale: 1, tx: 0, ty: 0 };
+/* 徽章固定屏幕尺寸：68px 设计（含圆角矩形/计数角标/提示等全部内部比例）整体等比缩放，
+   恒定显示为 32px。marker-grid 按 BADGE_K/view.scale 反向缩放 */
+const BADGE_DESIGN = 68;
+const BADGE_SCREEN = 32;
+const BADGE_K = BADGE_SCREEN / BADGE_DESIGN;
+const tracking = { epoch: 0, valid: false, capturedAt: 0, notBefore: 0, last: null };
+const diagnosticTimes = new Map();
+function reportTracking(level, event, message, details = {}) {
+  const now = Date.now();
+  if (now - (diagnosticTimes.get(event) ?? -Infinity) < 10000) return;
+  diagnosticTimes.set(event, now);
+  window.overlay?.reportDiagnostic?.({ level, event, message,
+    details: { map: state.map, epoch: tracking.epoch, ...details } });
+}
+window.addEventListener('error', e => reportTracking('ERROR', 'javascript-error', '叠加层脚本异常',
+  { message: e.message, file: e.filename, line: e.lineno, stack: e.error?.stack }));
+window.addEventListener('unhandledrejection', e => reportTracking('ERROR', 'unhandled-rejection', '叠加层异步任务异常',
+  { message: String(e.reason), stack: e.reason?.stack }));
+const sView = () => view.scale;
+function applyView() {
+  const t = `translate(${view.tx}px, ${view.ty}px) scale(${view.scale})`;
+  // --badge-inv 抵消图层 scale 并整体等比缩到 32px，让徽章保持屏幕固定大小（见 .marker-grid）
+  document.getElementById('marker-layer').style.setProperty('--badge-inv', String(BADGE_K / view.scale));
+  for (const id of ['marker-layer', 'label-layer', 'world-svg', 'tile-layer']) {
+    const n = document.getElementById(id);
+    n.style.transformOrigin = '0 0';
+    n.style.transform = t;
+  }
+}
+// 事件自动识别（坠机/断桥这类瓦片有变化的事件）：视觉进程从游戏画面判定后
+// 随 tracking:result 附带 events 推送。仅自动管理有 mapIds 的事件（哈德森
+// 无画面变化，只能手动）；手动点击后 EVENT_AUTO_GRACE_MS 内不自动回切。
+const EVENT_AUTO_GRACE_MS = 10000;
+function applyAutoEvents(detected) {
+  if (!detected) return;
+  const confs = D.mapConf[state.map].events || {};
+  let changed = false;
+  for (const [key, on] of Object.entries(detected)) {
+    if (!Array.isArray(confs[key]?.mapIds) || !confs[key].mapIds.length) continue;
+    if (Date.now() - (state.eventManualAt[key] || 0) < EVENT_AUTO_GRACE_MS) continue;
+    if (!!on !== state.events.includes(key)) {
+      state.events = on ? [...state.events, key] : state.events.filter(x => x !== key);
+      changed = true;
+      reportTracking('INFO', 'event.auto', on ? '识别到事件，自动开启' : '事件未发生，自动关闭', { event: key, map: state.map });
+    }
+  }
+  if (changed) { buildSidebar(); renderMap(); }
+}
+function loseTracking(message = '等待地图画面 · 可切换地图', error = '') {
+  pendingMarkerClick = null;
+  if (tracking.valid) {
+    window.overlay?.cancelPointer?.();
+    setInteract(false);
+  }
+  tracking.valid = false;
+  document.body.classList.add('tracking-unlocked');
+  document.body.classList.remove('tracking-nosignal');
+  updateNoSignalPanelMask([], 1, 1);
+  const status = document.getElementById('tracking-status');
+  status.dataset.state = 'searching';
+  status.textContent = message;
+  status.title = error;
+}
+function resetTracking(resumeLastView = false) {
+  pendingMarkerClick = null;
+  window.overlay?.cancelPointer?.();
+  tracking.epoch++;
+  tracking.capturedAt = 0;
+  tracking.last = null;
+  reportTracking('INFO', 'reset', '前端请求重新定位', { width: innerWidth, height: innerHeight });
+  loseTracking('正在定位地图…');
+  window.overlay?.configureTracking?.({ map: state.map, epoch: tracking.epoch, autoMap: state.autoMap, floor: state.floor,
+    notBefore: tracking.notBefore, resumeLastView: resumeLastView === true });
+}
+function hideMapForKey(event) {
+  if (!event || !['Esc', 'M'].includes(event.key) || !Number.isFinite(event.pressedAt)) return false;
+  dismissPopups();
+  // Both opening and closing use M. Hide on every first press, then let a fresh
+  // visual observation decide whether to show again after the UI transition.
+  tracking.notBefore = Math.max(tracking.notBefore, event.pressedAt + 200, Date.now() + 200);
+  resetTracking(true);
+  reportTracking('INFO', 'map-key', '地图快捷键按下，立即隐藏点位',
+    { key: event.key, source: event.source, pressedAt: event.pressedAt, delayMs: Date.now() - event.pressedAt });
+  return true;
+}
+function blockedByMapKey(result) {
+  return tracking.notBefore > 0 && (Date.now() < tracking.notBefore ||
+    !Number.isFinite(result.capturedAt) || result.capturedAt < tracking.notBefore);
+}
+// 开启「自动换图」前的知情确认：需打开地图等待识别成功才自动换图、显示物资点时
+// 偶发 2~5 秒延迟。确认卡固定在侧栏左上（区域已计入 trackPointer 穿透判定），
+// 「确定」后才真正开启。
+function openAutoMapConfirm() {
+  const dlg = $('#am-confirm');
+  if (!dlg || dlg.classList.contains('open')) return;
+  dlg.classList.add('open');
+  dlg.querySelector('.am-cancel').onclick = () => dlg.classList.remove('open');
+  dlg.querySelector('.am-ok').onclick = () => {
+    dlg.classList.remove('open');
+    if (state.autoMap) return;
+    state.autoMap = true;
+    persist(); buildSidebar(); renderMap(); resetTracking();
+  };
+}
+// 开启「直播/录屏模式」前的知情确认：本窗口与点位在直播/录屏画面中不可见。
+// 确认卡与 #am-confirm 同款（固定左上、区域计入穿透判定），「确定」后才真正开启。
+function openStreamHideConfirm(desktop = false) {
+  if (state.desktopCapture) return;
+  const dlg = $('#cap-confirm');
+  if (!dlg || dlg.classList.contains('open')) return;
+  dlg.querySelector('.am-title').textContent = desktop ? '开启桌面采集' : '开启直播/录屏模式';
+  dlg.querySelector('.am-text').textContent = desktop
+    ? '开启【桌面采集】将自动开启并锁定【直播/录屏模式】，本窗口和点位在直播/录屏画面中不可见（不可捕获）；关闭桌面采集后，直播/录屏模式将自动关闭并恢复操作。'
+    : '开启【直播/录屏模式】将使得本窗口和点位在直播/录屏画面中不可见（不可捕获），除此之外不影响任何功能使用。';
+  dlg.classList.add('open');
+  dlg.querySelector('.am-cancel').onclick = () => dlg.classList.remove('open');
+  dlg.querySelector('.am-ok').onclick = () => {
+    dlg.classList.remove('open');
+    if (desktop) { setDesktopCapture(true); return; }
+    if (state.desktopCapture) return;
+    if (state.streamHide) return;
+    state.streamHide = true;
+    persist(); buildSidebar();
+    window.overlay?.setCaptureHidden?.(true);
+  };
+}
+// 切换「直播/录屏模式」：开启走确认卡；关闭直接允许录屏捕获。
+function toggleStreamHide() {
+  if (state.desktopCapture) return;
+  if (!state.streamHide) { openStreamHideConfirm(); return; }
+  state.streamHide = false;
+  persist(); buildSidebar();
+  window.overlay?.setCaptureHidden?.(false);
+}
+function setDesktopCapture(enabled) {
+  if (state.desktopCapture === enabled) return;
+  state.desktopCapture = enabled;
+  state.streamHide = enabled;
+  $('#cap-confirm')?.classList.remove('open');
+  persist();
+  // Native applies capture exclusion before the capture thread changes source.
+  window.overlay?.setDesktopCapture?.(enabled);
+  buildSidebar();
+  resetTracking();
+}
+function toggleDesktopCapture() {
+  if (state.desktopCapture) setDesktopCapture(false);
+  else openStreamHideConfirm(true);
+}
+// 自动换图：视觉进程识别到对局地图（recognizedMap）后切换。与手动切换的差异：
+// 保留已选分类（分类本身按地图可用性过滤），事件 key 属于单张地图必须清空；
+// 模式沿用当前选择，新地图不支持时退到首个可用模式。
+function autoSwitchMap(key) {
+  const modes = (D.mapConf[key].modes || []).filter(m => !m.disabled || LOCAL_MODE_UNLOCK[key]);
+  stashModeCats();                      // 分类勾选按（地图+难度）记忆：切走前存回
+  state.map = key;
+  state.floor = null;
+  state.mode = modes.some(m => m.mode === state.mode) ? state.mode
+    : (modes[0] || D.mapConf[key].modes[0]).mode;
+  applyModeCats();
+  state.events = [];
+  state.eventManualAt = {};
+  persist(); buildSidebar(); renderMap();
+  reportTracking('INFO', 'auto-map', '已按识别结果自动切换地图', { map: key, mode: state.mode });
+  resetTracking();
+}
+// 对局内难度识别（左上角标签，仅关闭地图的作战画面可见，由管线空闲帧扫描）：
+// 只换难度层，不动地图、不重置定位；手动点选难度后 10 秒内不自动回切（同事件宽限口径）。
+let difficultyVote = '';
+function applyDetectedDifficulty(det) {
+  const sig = state.map + '/' + det.mode;
+  if (difficultyVote !== sig) { difficultyVote = sig; return; }
+  difficultyVote = '';
+  if (det.mode === state.mode) return;
+  if (Date.now() - (state.modeManualAt || 0) < 10000) return;
+  const entry = (D.mapConf[state.map]?.modes || []).find(m => m.mode === det.mode);
+  if (!entry || (entry.disabled && !LOCAL_MODE_UNLOCK[state.map])) return;
+  stashModeCats();                      // 分类勾选按（地图+难度）记忆：难度切换前存回
+  state.mode = det.mode;
+  applyModeCats();
+  persist(); buildSidebar(); renderMap();
+  reportTracking('INFO', 'difficulty.auto', '对局内识别到难度，已切换', { map: state.map, mode: det.mode });
+}
+// 楼层自动识别（潮汐监狱临时方案）：视觉进程从画面判定的楼层随 tracking:result
+// 附带推送；与手动按钮一致以识别结果为准（楼层即客观位置）。侧栏与点位同步重建
+// （分类计数按楼层过滤后增减，见 floorMatch/catCount）。
+function applyAutoFloor(floor) {
+  const list = floorsOf(state.map);
+  if (!list) return;
+  const key = list.some(f => f.key === floor) ? floor : null;
+  if (key !== state.floor) {
+    state.floor = key;
+    buildSidebar(); renderMap();
+    reportTracking('INFO', 'floor.auto', '识别到楼层，自动切换', { map: state.map, floor: key || 'base' });
+  }
+}
+function setFloor(key) {
+  if (!floorsOf(state.map) || key === state.floor) return;
+  state.floor = key;
+  buildSidebar(); renderMap();
+  reportTracking('INFO', 'floor.manual', '手动切换楼层', { map: state.map, floor: key || 'base' });
+  resetTracking();
+}
+/* ---------- 无信号临时地图：固定视野姿态（视觉进程规则定位，NCC 验证） ----------
+   底图 = 当前图瓦片按姿态铺满（25% 显示强度、纯视觉穿透）；点位沿用既有渲染管线与
+   分类/难度/事件/楼层筛选，交互（悬停接管/点击详情）与锁定态完全一致。姿态来自
+   管线 no-signal 结果（规则=横版铺满+垂直锚点，参照仅瓦片，逐图自标定缓存）。 */
+function openNoSignalMapConfirm() {
+  const dlg = $('#ns-confirm');
+  if (!dlg || dlg.classList.contains('open') || state.nosignalMap) return;
+  dlg.classList.add('open');
+  dlg.querySelector('.am-cancel').onclick = () => dlg.classList.remove('open');
+  dlg.querySelector('.am-ok').onclick = () => {
+    dlg.classList.remove('open');
+    if (state.nosignalMap) return;
+    state.nosignalMap = true;
+    persist(); buildSidebar();
+    applyNoSignalMapVisibility();
+  };
+}
+function applyNoSignalMapVisibility() {
+  document.body.classList.toggle('nosignal-map-hidden', !state.nosignalMap);
+  if (tracking.valid && document.body.classList.contains('tracking-nosignal')) {
+    if (state.nosignalMap) renderNoSignalTiles();
+    document.getElementById('tracking-status').textContent = state.nosignalMap
+      ? '无信号区域 · 临时地图' : '无信号区域 · 点位已对齐';
+  }
+}
+function updateNoSignalPanelMask(panels, frameWidth, frameHeight) {
+  const layer = document.getElementById('ns-clip');
+  const holes = document.getElementById('ns-panel-holes');
+  if (!layer || !holes) return;
+  const rects = [];
+  if (Array.isArray(panels) && Number.isFinite(frameWidth) && frameWidth > 0 &&
+      Number.isFinite(frameHeight) && frameHeight > 0) {
+    for (const panel of panels) {
+      if (!panel || !['tasks', 'legend'].includes(panel.kind) ||
+          ![panel.x, panel.y, panel.width, panel.height].every(Number.isFinite) ||
+          panel.width <= 0 || panel.height <= 0) continue;
+      const x = Math.max(0, Math.min(1, panel.x / frameWidth));
+      const y = Math.max(0, Math.min(1, panel.y / frameHeight));
+      const right = Math.max(0, Math.min(1, (panel.x + panel.width) / frameWidth));
+      const bottom = Math.max(0, Math.min(1, (panel.y + panel.height) / frameHeight));
+      if (right > x && bottom > y) rects.push({ x, y, width: right - x, height: bottom - y });
+    }
+  }
+  const key = JSON.stringify(rects);
+  if (layer.dataset.panelMask === key) return;
+  // 黑色矩形叠加取并集：重叠面板也不会把交叠部分重新显示。
+  holes.replaceChildren(...rects.map(rect => {
+    const node = document.createElementNS('http://www.w3.org/2000/svg', 'rect');
+    for (const [name, value] of Object.entries(rect)) node.setAttribute(name, value);
+    node.setAttribute('fill', 'black');
+    return node;
+  }));
+  layer.style.maskImage = rects.length ? 'url("#ns-panel-mask")' : 'none';
+  layer.dataset.panelMask = key;
+}
+function renderNoSignalTiles() {
+  const layer = document.getElementById('tile-layer');
+  if (!state.nosignalMap || !layer || !D.mapConf[state.map]) return;
+  const off = D.mapConf[state.map].offset || {};
+  const cols = off.cols || 16, rows = off.rows || 16;
+  // 容器显式世界尺寸：绝对定位子元素不撑容器，无尺寸容器的 max-width:100% 会把
+  // 瓦片钳成 0 宽（配合 #tile-layer img 的 max-width:none 双保险）
+  layer.style.width = cols * 256 + 'px';
+  layer.style.height = rows * 256 + 'px';
+  // 固定视野下按 view 反解可见世界矩形，只挂视野内的瓦片（固定视野 ≈ 全图横向铺满）
+  const inv = 1 / view.scale;
+  const wx0 = Math.max(0, Math.floor(-view.tx * inv)), wy0 = Math.max(0, Math.floor(-view.ty * inv));
+  const wx1 = Math.min(cols * 256, Math.ceil((innerWidth - view.tx) * inv));
+  const wy1 = Math.min(rows * 256, Math.ceil((innerHeight - view.ty) * inv));
+  // 姿态微调只更新世界层变换；瓦片集合未变化时复用已解码的 img，避免重复卸载/加载闪烁。
+  const tileKey = [state.map, cols, rows, Math.floor(wx0 / 256), Math.floor(wy0 / 256),
+    Math.ceil(wx1 / 256), Math.ceil(wy1 / 256)].join('/');
+  if (layer.dataset.tileKey === tileKey && layer.childElementCount) return;
+  const previous = new Map([...layer.children].map(img => [img.dataset.tile, img]));
+  const wanted = new Set();
+  for (let y = Math.floor(wy0 / 256); y * 256 < wy1 && y < rows; y++)
+    for (let x = Math.floor(wx0 / 256); x * 256 < wx1 && x < cols; x++) {
+      const key = `${state.map}/${x}/${y}`;
+      wanted.add(key);
+      if (previous.has(key)) continue;
+      const img = document.createElement('img');
+      img.dataset.tile = key;
+      img.src = `images/dfmap/${state.map}/map/4_${x}_${y}.webp`;
+      img.style.left = x * 256 + 'px';
+      img.style.top = y * 256 + 'px';
+      img.alt = '';
+      layer.appendChild(img);
+    }
+  for (const [key, img] of previous) if (!wanted.has(key)) img.remove();
+  layer.dataset.tileKey = tileKey;
+}
+function acceptNosignal(result) {
+  if (blockedByMapKey(result)) return false;
+  const ns = result.nosignal;
+  // 时效校验与正常定位同口径：管线每次发布都带新观察时间（门控每帧、提示 ≤0.8s），
+  // 旧帧任务产物不得借 no-signal 通道冒充新鲜观察进入显示态
+  if (!Number.isFinite(result.capturedAt) || Date.now() - result.capturedAt > 750 ||
+      result.capturedAt > Date.now() + 100) {
+    reportTracking('WARN', 'nosignal.stale', '前端拒绝过期无信号观察',
+      { capturedAt: result.capturedAt, ageMs: Number.isFinite(result.capturedAt) ? Date.now() - result.capturedAt : null });
+    return false;
+  }
+  if (!ns || !ns.pose || ![ns.pose.scale, ns.pose.tx, ns.pose.ty].every(Number.isFinite) ||
+      !Number.isFinite(ns.width) || !Number.isFinite(ns.height) || ns.pose.scale <= 0 || ns.width <= 0 || ns.height <= 0) {
+    // 无姿态（复检暂时不过但未退态）：只报状态不叠图，宁缺勿错
+    if (ns?.pose) reportTracking('WARN', 'nosignal.invalid', '前端拒绝无效无信号坐标或画面尺寸',
+      { pose: ns.pose, frameWidth: ns.width ?? null, frameHeight: ns.height ?? null });
+    loseTracking('无信号区域 · 临时地图未能对齐');
+    return false;
+  }
+  const sx = innerWidth / ns.width, sy = innerHeight / ns.height;
+  if (Math.abs(sx / sy - 1) > .02) {
+    reportTracking('WARN', 'aspect-mismatch', '无信号画面与窗口宽高比不一致，隐藏临时地图',
+      { frameWidth: ns.width, frameHeight: ns.height, windowWidth: innerWidth, windowHeight: innerHeight });
+    loseTracking('画面尺寸变化 · 正在重新定位');
+    return false;
+  }
+  const scale = ns.pose.scale * sx, tx = ns.pose.tx * sx, ty = ns.pose.ty * sy;
+  const moved = Math.abs(view.scale - scale) > .001 || Math.hypot(view.tx - tx, view.ty - ty) > 2;
+  if (moved) pendingMarkerClick = null;
+  Object.assign(view, { scale, tx, ty });
+  if (!tracking.valid) reportTracking('INFO', 'nosignal.visible', '无信号固定视野已对齐，显示临时地图与点位',
+    { map: state.map, ...view, ncc: ns.ncc });
+  tracking.valid = true;
+  tracking.notBefore = 0;
+  tracking.capturedAt = result.capturedAt;
+  document.body.classList.remove('tracking-unlocked');
+  if (!document.body.classList.contains('tracking-nosignal')) {
+    document.body.classList.add('tracking-nosignal');
+    // 潮汐监狱等有楼层的图：无信号视野即全景（基础层），点位筛选同步回到全景口径
+    // （阶段 A 固定全景；退出后由楼层自动识别恢复）。不经 setFloor——那会 resetTracking
+    if (floorsOf(state.map) && state.floor !== null) {
+      state.floor = null;
+      buildSidebar(); renderMap();
+    }
+    renderNoSignalTiles();
+  } else if (moved) {
+    renderNoSignalTiles();   // 分辨率/姿态微调时仅增删视口边缘瓦片
+  }
+  // 面板开合可以发生在同一固定姿态下，独立更新遮罩，不能重建瓦片或重置定位。
+  updateNoSignalPanelMask(result.mapPanels, ns.width, ns.height);
+  applyView();
+  const status = document.getElementById('tracking-status');
+  status.dataset.state = 'locked';
+  applyNoSignalMapVisibility();
+  status.title = '';
+  if (pointerPosition) trackPointer(pointerPosition.clientX, pointerPosition.clientY);
+  return false;
+}
+function acceptTracking(result) {
+  if (Number.isFinite(result.publishedAt) && Date.now() - result.publishedAt > 250)
+    reportTracking('WARN', 'delivery-delay', '定位结果到达前端延迟',
+      { deliveryMs: Date.now() - result.publishedAt, valid: result.valid });
+  if (result.epoch !== tracking.epoch) {
+    reportTracking('WARN', 'old-epoch', '前端拒绝旧定位任务', { resultEpoch: result.epoch });
+    return false;
+  }
+  // Apply before recognizedMap/difficulty and no-signal branches as well: old
+  // recognition events may not switch maps or revive tiles after a key press.
+  if (blockedByMapKey(result)) return false;
+  if (result.capturedAt && result.capturedAt < tracking.capturedAt) {
+    reportTracking('WARN', 'out-of-order', '前端拒绝乱序画面', { capturedAt: result.capturedAt, lastAcceptedAt: tracking.capturedAt });
+    return false;
+  }
+  tracking.last = result;
+  if (!result.valid) {
+    // 无信号跨图识别（自动换图开启、选错图时管线以规则 NCC 竞争出正确图）：识别是
+    // 「这是哪张图」的事件，优先于时效/状态处理；autoSwitchMap 会 bump epoch，
+    // 本条结果自然作废，切换后管线在新图上重新进态
+    if (result.recognizedMap && result.recognizedMap !== state.map &&
+        state.autoMap && D.mapConf[result.recognizedMap]) {
+      autoSwitchMap(result.recognizedMap);
+      return false;
+    }
+    if (result.reason === 'no-signal') return acceptNosignal(result);
+    if (result.difficulty && state.autoMap) applyDetectedDifficulty(result.difficulty);
+    const message = result.error ? '定位不可用 · 切图重试'
+      : result.reason === 'identifying-map' ? '正在识别地图…' : undefined;
+    loseTracking(message, result.error || '');
+    return false;
+  }
+  // 慢识别事件可以切图，但它携带的坐标仍须是新鲜观察。
+  // 切图后过期姿态只等待新帧，不短暂显示后再由定时器隐藏。
+  if (result.recognizedMap && result.recognizedMap !== state.map &&
+      state.autoMap && D.mapConf[result.recognizedMap]) {
+    autoSwitchMap(result.recognizedMap);
+  }
+  const { scale, tx, ty, width, height, capturedAt } = result;
+  if (![scale, tx, ty, width, height, capturedAt].every(Number.isFinite) || scale <= 0 || width <= 0 || height <= 0 ||
+    Date.now() - capturedAt > 750 || capturedAt > Date.now() + 100) {
+    reportTracking('WARN', 'invalid-observation', '前端拒绝无效或过期坐标',
+      { scale, tx, ty, width, height, capturedAt, ageMs: Date.now() - capturedAt });
+    loseTracking('画面更新延迟 · 正在重新定位');
+    return false;
+  }
+  const sx = innerWidth / width, sy = innerHeight / height;
+  if (Math.abs(sx / sy - 1) > .02) {
+    reportTracking('WARN', 'aspect-mismatch', '截图与窗口宽高比不一致，隐藏点位',
+      { frameWidth: width, frameHeight: height, windowWidth: innerWidth, windowHeight: innerHeight, sx, sy });
+    loseTracking('画面尺寸变化 · 正在重新定位');
+    return false;
+  }
+  if (Math.abs(view.scale - scale*sx) > .001 || Math.hypot(view.tx-tx*sx, view.ty-ty*sy) > 2)
+    pendingMarkerClick = null;
+  Object.assign(view, { scale: scale*sx, tx: tx*sx, ty: ty*sy });
+  if (!tracking.valid) reportTracking('INFO', 'visible', '前端已应用定位结果，显示点位',
+    { ...view, source: result.source, ageMs: Date.now() - capturedAt });
+  tracking.valid = true;
+  tracking.notBefore = 0;
+  tracking.capturedAt = capturedAt;
+  applyView();
+  document.body.classList.remove('tracking-unlocked');
+  document.body.classList.remove('tracking-nosignal');
+  updateNoSignalPanelMask([], 1, 1);
+  const status = document.getElementById('tracking-status');
+  status.dataset.state = 'locked';
+  status.textContent = '地图已对齐';
+  status.title = '';
+  if (pointerPosition) trackPointer(pointerPosition.clientX, pointerPosition.clientY);
+  applyAutoEvents(result.events);
+  applyAutoFloor(result.floor);
+  return true;
+}
+function dismissPopups() {
+  pendingMarkerClick = null;
+  closePopover();
+}
+/* ---------- 工具 ---------- */
+const el = (tag, cls, attrs) => {
+  const e = document.createElement(tag);
+  if (cls) e.className = cls;
+  if (attrs) for (const [k, v] of Object.entries(attrs)) e.setAttribute(k, v);
+  return e;
+};
+const CLASS_NAMES = { open: '常规可见', random: '随机可见', card: '需要房卡', task: '任务触发', special: '特殊条件', del: '已删除', az3my: '需要密钥' };
+const esc = (s) => String(s ?? '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+const iconSrc = (id) => `images/dfmap/base/icon/${id}.webp`;
+// 事件过滤：未选事件时按 ['none'] 匹配 —— eventInclude 含 none 的点仅无事件时可见，
+// eventExclude 含 none 的点仅在选中事件后可见；eventInclude 与选中事件任一匹配即可见。
+const eventMatch = (p) => {
+  const sel = state.events.length ? state.events : ['none'];
+  if (p.eventInclude && p.eventInclude.length && !p.eventInclude.some(e => sel.includes(e))) return false;
+  if (p.eventExclude && p.eventExclude.length && p.eventExclude.some(e => sel.includes(e))) return false;
+  return true;
+};
+// 楼层过滤（有楼层配置的地图）：无楼层字段（出生/撤离/鱼群等室外点）恒可见；
+// 带楼层的点仅在对应楼层激活时可见，全景/基础层按 1F（地面层）口径展示。
+const floorMatch = (p) => {
+  if (!floorsOf(state.map) || p.floor == null) return true;
+  const active = state.floor ? Number(state.floor.slice(1)) : 1;
+  return p.floor === active;
+};
+const pointVisible = (p) =>
+  (!p.mode || p.mode.includes(state.mode)) &&
+  state.checkedClasses.has(p.class || 'open') &&
+  eventMatch(p) && floorMatch(p);
+const catPoints = (catId) => D.maps[state.map].Points[catId] || [];
+const catCount = (catId) => catPoints(catId).reduce((s, p) => s + (pointVisible(p) ? (p.count || 1) : 0), 0);
+const catAvailable = (entry) =>
+  (!entry.mapSelects || entry.mapSelects.includes(state.map)) && catCount(entry.id) > 0;
+
+/* ---------- 界面缩放：侧栏/HUD 按窗口高度自适应 ----------
+   设计基准是 2K（高 1440）；窗口更矮时等比缩小，下限 0.75 保证 1080p 及以下
+   仍可读。写入 :root 的 --ui-zoom 供 CSS zoom 消费（见样式表内说明）。 */
+const UI_REF_HEIGHT = 1440;
+function uiZoom() { return Math.min(1, Math.max(.75, innerHeight / UI_REF_HEIGHT)); }
+function applyUiZoom() {
+  document.documentElement.style.setProperty('--ui-zoom', uiZoom().toFixed(4));
+}
+
+/* ---------- 北京时间（侧栏顶栏） ----------
+   中国无夏令时，UTC+8 恒定，直接按 UTC 偏移取值（不依赖系统时区/Intl locale）。
+   侧栏 DOM 随 buildSidebar 重建，节点每次查询；刷新对齐整秒 +5ms 兜底。 */
+function beijingClockText(now = Date.now()) {
+  const t = new Date(now + 8 * 3600e3);
+  const z = (n) => String(n).padStart(2, '0');
+  return `${t.getUTCFullYear()}-${z(t.getUTCMonth() + 1)}-${z(t.getUTCDate())} ` +
+    `${z(t.getUTCHours())}:${z(t.getUTCMinutes())}:${z(t.getUTCSeconds())}`;
+}
+// buildSidebar 重建时节点尚未挂载到文档，须直接传入新建节点立即回填。
+// 时间只写 .sb-clock-t 内层（.sb-clock 上还有绝对定位的退出按钮，不能整块重写）。
+function updateSbClock(box = document.querySelector('#sidebar .sb-clock')) {
+  if (!box) return;
+  const [date, time] = beijingClockText().split(' ');
+  const t = box.querySelector('.sb-clock-t') || box;
+  t.innerHTML = `<span>${date}</span><b>${time}</b>`;
+}
+function startSbClock() {
+  const tick = () => { updateSbClock(); setTimeout(tick, 1000 - (Date.now() % 1000) + 5); };
+  tick();
+}
+
+/* ---------- 侧边栏（战术 HUD 主题） ---------- */
+const GICON = {
+  lt: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M8 21h8M12 17v4M7 4h10v6a5 5 0 0 1-10 0V4zM7 6H4a3 3 0 0 0 3 5M17 6h3a3 3 0 0 1-3 5"/></svg>',
+  fish: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 12c2.6-3.8 5.8-6 9.5-6 3.6 0 6.4 2.2 7.9 4.6L21 12l-.6 1.4c-1.5 2.4-4.3 4.6-7.9 4.6-3.7 0-6.9-2.2-9.5-6z"/><path d="M4 12 1.5 8.6v6.8L4 12z" fill="currentColor" stroke="none"/><circle cx="15.6" cy="10.4" r="1" fill="currentColor" stroke="none"/></svg>',
+  goods: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8l-9-5-9 5v8l9 5 9-5V8zM3 8l9 5 9-5M12 13v8"/></svg>',
+  b_asl: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a8 8 0 0 1 8 8v6l-3 2-3-2v-3h-4v3l-3 2-3-2v-6a8 8 0 0 1 8-8z"/><circle cx="9" cy="11" r="1" fill="currentColor"/><circle cx="15" cy="11" r="1" fill="currentColor"/></svg>',
+  b_hfk: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3a8 8 0 0 1 8 8v6l-3 2-3-2v-3h-4v3l-3 2-3-2v-6a8 8 0 0 1 8-8z"/><circle cx="9" cy="11" r="1" fill="currentColor"/><circle cx="15" cy="11" r="1" fill="currentColor"/></svg>',
+  other: '<svg viewBox="0 0 24 24" fill="currentColor"><circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/></svg>',
+};
+/* 侧栏功能页：地图工具（原有内容）/ 重要收集（长弓溪谷唐吉彩蛋记录）/ 阿萨拉记牌器 / 关于 */
+const SIDEBAR_TABS = [
+  { key: 'map', name: '地图工具', title: '物资点位地图工具',
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 4 3 6v14l6-2 6 2 6-2V4l-6 2-6-2z"/><path d="M9 4v14M15 6v14"/></svg>' },
+  { key: 'collect', name: '重要收集', title: '长弓溪谷唐吉彩蛋收集品记录',
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M21 8l-9-5-9 5v8l9 5 9-5V8z"/><path d="M3 8l9 5 9-5M12 13v8"/></svg>' },
+  { key: 'poker', name: '阿萨拉记牌器', title: '阿萨拉扑克牌收集记录（共 54 张）',
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4.5" y="2.5" width="15" height="19" rx="2.5"/><path d="M12 6.8c-2.6 2.1-3.9 3.9-3.9 5.5 0 1.3.9 2.3 2.1 2.3.5 0 .9-.1 1.3-.4-.2 1.3-.8 2.4-1.7 3.1v.4h4.4v-.4c-.9-.7-1.5-1.8-1.7-3.1.4.3.8.4 1.3.4 1.2 0 2.1-1 2.1-2.3 0-1.6-1.3-3.4-3.9-5.5z"/></svg>' },
+  { key: 'about', name: '关于', title: '关于三角洲鼠鼠导航（快捷键 / 版本 / 作者 / 赞助 / 特殊功能）',
+    icon: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01M12 11.5V16"/></svg>' },
+];
+function buildSidebar() {
+  const root = $('#sidebar-root');
+  // 同一功能页重建时保留列表位置；切换功能页仍从顶部开始。
+  const previous = root.querySelector('#sidebar');
+  const scrollTop = previous?.dataset.tab === state.sidebarTab
+    ? previous.querySelector('.sb-scroll')?.scrollTop || 0 : 0;
+  root.innerHTML = '';
+  const wrap = el('div', 'left-menu-wrapper', { id: 'sidebar', 'data-tab': state.sidebarTab, [OD]: '' });
+  const frame = el('div', 'sb-frame', { [OD]: '' });
+  const menu = el('div', 'left-menu', { [OD]: '' });
+
+  /* -- 顶栏北京时间（功能页 Tab 之上；新建节点直接回填，后续由 startSbClock 秒沿
+       刷新）+ 左对齐退出按钮（完全退出应用） -- */
+  const clock = el('div', 'sb-clock', { [OD]: '' });
+  const quitBtn = el('button', 'sb-quit', { type: 'button', title: '退出三角洲鼠鼠导航', [OD]: '' });
+  quitBtn.textContent = '✕';
+  quitBtn.onclick = () => window.overlay?.quitApp?.();
+  const clockTime = el('div', 'sb-clock-t', { [OD]: '' });
+  clock.append(quitBtn, clockTime);
+  updateSbClock(clock);
+  menu.appendChild(clock);
+
+  /* -- 顶部功能页 Tab：切换侧栏内容页 -- */
+  const tabs = el('div', 'sb-tabs', { [OD]: '', role: 'tablist' });
+  for (const tab of SIDEBAR_TABS) {
+    const b = el('button', `sb-tab${state.sidebarTab === tab.key ? ' on' : ''}`,
+      { type: 'button', role: 'tab', 'aria-selected': String(state.sidebarTab === tab.key), title: tab.title, [OD]: '' });
+    b.innerHTML = `<span class="sb-tab-ic">${tab.icon}</span>${tab.name}`;
+    b.onclick = () => {
+      if (state.sidebarTab === tab.key) return;
+      state.sidebarTab = tab.key;
+      $('#map-menu')?.classList.remove('open');   // 地图菜单锚定在地图页头部行，随页面切换关闭
+      persist(); buildSidebar();
+    };
+    tabs.appendChild(b);
+  }
+  menu.appendChild(tabs);
+
+  if (state.sidebarTab === 'poker') buildPokerPanel(menu);
+  else if (state.sidebarTab === 'collect') buildCollectPanel(menu);
+  else if (state.sidebarTab === 'about') buildAboutPanel(menu);
+  else buildMapPanel(menu);
+  frame.appendChild(menu);
+  wrap.appendChild(frame);
+
+  /* -- 折叠把手（几何/动画沿用 site_external.css，配色由主题覆盖） -- */
+  const handle = el('button', 'toggle-btn', { id: 'collapse-handle', type: 'button', [OD]: '' });
+  const arrow = el('span', null, { [OD]: '' });
+  arrow.textContent = state.sidebarCollapsed ? '▶' : '◀';
+  handle.appendChild(arrow);
+  handle.onclick = toggleSidebar;
+  wrap.appendChild(handle);
+  root.appendChild(wrap);
+  applyCollapse();
+  const scroll = wrap.querySelector('.sb-scroll');
+  if (scroll) scroll.scrollTop = scrollTop;
+}
+
+/* 地图工具页：地图切换头部 + 特殊事件 / 局内任务 / 性质筛选 + 分类分组（原侧栏内容） */
+function buildMapPanel(menu) {
+
+  /* -- 头部：地图名 + 模式徽章 + 切换触发（第一行）；下方独立开关行
+         （自动换图 / 地标 / 无信号临时地图）。第一行整行即「切换地图」按钮
+         （原右上角 #switch-btn 移入），点击在下方弹出 #map-menu */
+  const head = el('div', 'sb-head', { [OD]: '' });
+  const headRow = el('div', 'sb-head-row', { id: 'switch-btn', role: 'button', tabindex: '0', title: '点击切换地图 / 模式', [OD]: '' });
+  const mapName = el('span', 'sb-map', { [OD]: '' });
+  mapName.textContent = D.mapConf[state.map].name;
+  const modeChip = el('span', 'sb-mode', { [OD]: '' });
+  modeChip.textContent = D.modeNames[state.mode] || state.mode;
+  const swHint = el('span', 'sb-map-sw', { [OD]: '' });
+  swHint.textContent = '切换';
+  headRow.onclick = () => toggleMapMenu();
+  headRow.onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleMapMenu(); }
+  };
+  headRow.classList.toggle('menu-open', $('#map-menu')?.classList.contains('open'));
+  headRow.append(mapName, modeChip, swHint);
+  head.appendChild(headRow);
+  // 开关行（不在菜单触发行上，点击天然不冒泡到 #switch-btn）
+  const headSwitches = el('div', 'sb-head-sw', { [OD]: '' });
+  const amLab = el('span', 'sb-sw-label', { [OD]: '', title: '识别到对局内其他地图画面时自动切换' });
+  amLab.textContent = '自动换图';
+  const amSw = el('div', `sb-sw${state.autoMap ? ' on' : ''}`, { role: 'switch', 'aria-checked': String(state.autoMap), tabindex: '0' });
+  const toggleAutoMap = (e) => {
+    e.stopPropagation();
+    if (!state.autoMap) { openAutoMapConfirm(); return; }   // 开启需先在确认卡点「确定」
+    state.autoMap = false;
+    persist(); buildSidebar(); renderMap(); resetTracking();   // 重新配置定位，开关立即生效
+  };
+  amSw.onclick = toggleAutoMap;
+  amLab.onclick = toggleAutoMap;
+  const lbLab = el('span', 'sb-sw-label', { [OD]: '' });
+  lbLab.textContent = '地标';
+  const sw = el('div', `sb-sw${state.labelsOn ? ' on' : ''}`, { role: 'switch', 'aria-checked': String(state.labelsOn), tabindex: '0' });
+  const toggleLabels = (e) => { e.stopPropagation(); state.labelsOn = !state.labelsOn; persist(); buildSidebar(); renderMap(); };
+  sw.onclick = toggleLabels;
+  lbLab.onclick = toggleLabels;
+  const nsLab = el('span', 'sb-sw-label', { [OD]: '', title: '仅显示或隐藏无信号区域的临时底图，不影响识别与物资点' });
+  nsLab.textContent = '无信号临时地图';
+  const nsSw = el('div', `sb-sw${state.nosignalMap ? ' on' : ''}`, { role: 'switch', 'aria-checked': String(state.nosignalMap), tabindex: '0' });
+  const toggleNosignal = (e) => {
+    e.stopPropagation();
+    if (!state.nosignalMap) { openNoSignalMapConfirm(); return; }
+    state.nosignalMap = false;
+    persist(); buildSidebar();
+    applyNoSignalMapVisibility();   // 只改视觉层，不重置定位或取消点位交互。
+  };
+  nsSw.onclick = toggleNosignal;
+  nsLab.onclick = toggleNosignal;
+  headSwitches.append(amLab, amSw, lbLab, sw, nsLab, nsSw);
+  head.appendChild(headSwitches);
+  menu.appendChild(head);
+
+  /* -- 特殊事件：支持多选，选项名取事件名映射；无事件地图显示「暂无特殊事件」占位 -- */
+  const events = D.mapConf[state.map].events || {};
+  const evKeys = Object.keys(events);
+  const evRow = el('div', 'sb-row', { [OD]: '' });
+  if (evKeys.length) {
+    const evHead = el('div', 'sb-chips-head', { [OD]: '' });
+    const evTitle = el('span', 'sb-chips-title', { [OD]: '' });
+    evTitle.textContent = '特殊事件';
+    evHead.appendChild(evTitle);
+    const evChips = el('div', 'sb-chips', { [OD]: '' });
+    for (const k of evKeys) {
+      const chip = el('div', `sb-chip k-event${state.events.includes(k) ? ' on' : ''}`, { [OD]: '' });
+      chip.innerHTML = `<span class="sb-chip-dot"></span>${esc((D.eventNames && D.eventNames[k]) || k)}`;
+      chip.onclick = () => {
+        state.events = state.events.includes(k) ? state.events.filter(x => x !== k) : [...state.events, k];
+        state.eventManualAt[k] = Date.now();
+        buildSidebar(); renderMap();
+      };
+      evChips.appendChild(chip);
+    }
+    evRow.append(evHead, evChips);
+  } else {
+    const evNone = el('div', 'sb-ev-none', { [OD]: '' });
+    evNone.textContent = '暂无特殊事件';
+    evRow.appendChild(evNone);
+  }
+  menu.appendChild(evRow);
+
+  /* -- 局内任务：行内计数 + 点击展开任务列表（行本身为触发区；无任务时整行隐藏） -- */
+  const conf = D.mapConf[state.map];
+  const taskList = expandTasks(conf.tasks || {});
+  if (taskList.length) {
+    const guCount = taskList.filter(t => t.odds === 'gu').length;
+    const hidCount = taskList.filter(t => t.odds === 'yc').length;
+    const randCount = taskList.length - hidCount;
+    const anchor = el('div', 'sb-row sb-task-anchor', { [OD]: '' });
+    const taskRow = el('div', 'sb-task', { [OD]: '' });
+    taskRow.innerHTML = '局内任务' +
+      (guCount ? ` <b>${guCount}</b> 个必刷,` : '') +
+      (hidCount ? ` <b>${hidCount}</b> 个隐藏,` : '') +
+      ` <b>${randCount}</b> 种随机`;
+    const viewBtn = el('button', 'sb-btn', { type: 'button', [OD]: '', 'aria-expanded': String(state.tasksOpen) });
+    viewBtn.textContent = '查看';
+    taskRow.appendChild(viewBtn);
+    taskRow.onclick = () => { state.tasksOpen = !state.tasksOpen; renderTaskPop(); };
+    anchor.appendChild(taskRow);
+    anchor.appendChild(el('div', 'sb-task-pop', { id: 'task-pop' }));
+    menu.appendChild(anchor);
+    renderTaskPop();
+  }
+
+  /* -- 性质筛选（色点芯片） -- */
+  const chipRow = el('div', 'sb-row', { [OD]: '' });
+  const chipHead = el('div', 'sb-chips-head', { [OD]: '' });
+  const chipTitle = el('span', 'sb-chips-title', { [OD]: '' });
+  chipTitle.textContent = '性质筛选';
+  const allBtn = el('button', 'sb-txtbtn', { type: 'button', [OD]: '' });
+  allBtn.textContent = '全选';
+  const clearBtn = el('button', 'sb-txtbtn', { type: 'button', [OD]: '' });
+  clearBtn.textContent = '清空';
+  const allIds = currentCatIds();
+  allBtn.onclick = () => updateCategories(allIds, true);
+  clearBtn.onclick = () => updateCategories(allIds, false);
+  chipHead.append(chipTitle, allBtn, clearBtn);
+  const chipsBox = el('div', 'sb-chips', { [OD]: '' });
+  for (const code of CHIP_ORDER) {
+    const meta = D.chips[code];
+    if (!meta) continue;
+    if (meta.mapSelects && !meta.mapSelects.includes(state.map)) continue;
+    const chip = el('div', `sb-chip k-${code}${state.checkedClasses.has(code) ? ' on' : ''}`, { [OD]: '' });
+    chip.innerHTML = `<span class="sb-chip-dot"></span>${esc(meta.name)}`;
+    if (meta.tips) chip.title = meta.tips;
+    chip.onclick = () => {
+      state.checkedClasses.has(code) ? state.checkedClasses.delete(code) : state.checkedClasses.add(code);
+      persist(); buildSidebar(); renderMap();
+    };
+    chipsBox.appendChild(chip);
+  }
+  chipRow.append(chipHead, chipsBox);
+  menu.appendChild(chipRow);
+
+  /* -- 楼层（潮汐监狱临时方案）：全景/各楼层切换 chips，位于性质筛选下方；
+         自动识别与手动点击共用 state.floor（applyAutoFloor / setFloor） -- */
+  const floorList = floorsOf(state.map);
+  if (floorList) {
+    const flRow = el('div', 'sb-row', { [OD]: '' });
+    const flHead = el('div', 'sb-chips-head', { [OD]: '' });
+    const flTitle = el('span', 'sb-chips-title', { [OD]: '' });
+    flTitle.textContent = '楼层';
+    flHead.appendChild(flTitle);
+    const flChips = el('div', 'sb-chips', { [OD]: '' });
+    for (const f of [{ key: null, label: '全景' }, ...floorList]) {
+      const chip = el('div', `sb-chip k-floor${(f.key || null) === state.floor ? ' on' : ''}`, { [OD]: '' });
+      chip.innerHTML = `<span class="sb-chip-dot"></span>${esc(f.label)}`;
+      chip.title = f.key == null ? '室外全景底图（地面物资按 1F 口径显示）' : `${f.label} 楼层底图与物资`;
+      chip.onclick = () => setFloor(f.key);
+      flChips.appendChild(chip);
+    }
+    flRow.append(flHead, flChips);
+    menu.appendChild(flRow);
+  }
+
+  /* -- 分组折叠 -- */
+  const scroll = el('div', 'sb-scroll', { [OD]: '' });
+  const savedFold = JSON.parse(localStorage.getItem('deltabox_folded') || '[]');
+  for (const gid of GROUP_ORDER) {
+    const entries = D.catalog[gid] || [];
+    const avail = entries.filter(catAvailable);
+    if (!avail.length) continue;
+    const meta = D.groupMeta[gid];
+    const grp = el('div', `sb-grp${savedFold.includes(gid) ? '' : ' open'}`, { [OD]: '' });
+    const gh = el('div', 'sb-grp-h', { role: 'button', tabindex: '0', 'aria-expanded': String(!savedFold.includes(gid)) });
+    gh.innerHTML =
+      `<span class="sb-grp-ic">${GICON[gid] || GICON.other}</span>` +
+      `<span class="sb-grp-name">${esc((meta.mapNames && meta.mapNames[state.map]) || meta.name)}</span>` +
+      `<span class="sb-grp-mini"><button type="button" class="sb-txtbtn">全选</button><button type="button" class="sb-txtbtn">清空</button></span>` +
+      `<span class="sb-grp-cnt">${avail.length}</span>` +
+      `<svg class="sb-grp-chev" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M9 6l6 6-6 6"/></svg>`;
+    const ids = avail.map(e => e.id);
+    const [gAll, gClear] = gh.querySelectorAll('.sb-txtbtn');
+    gAll.onclick = (e) => { e.stopPropagation(); updateCategories(ids, true); };
+    gClear.onclick = (e) => { e.stopPropagation(); updateCategories(ids, false); };
+    gh.onclick = () => {
+      grp.classList.toggle('open');
+      const folded = !grp.classList.contains('open');
+      gh.setAttribute('aria-expanded', String(!folded));
+      const f = new Set(JSON.parse(localStorage.getItem('deltabox_folded') || '[]'));
+      folded ? f.add(gid) : f.delete(gid);
+      localStorage.setItem('deltabox_folded', JSON.stringify([...f]));
+    };
+    grp.appendChild(gh);
+    const gbody = el('div', 'sb-grp-body', { [OD]: '' });
+    const grid = el('div', 'sb-tiles', { [OD]: '' });
+    for (const entry of avail) grid.appendChild(buildTile(entry));
+    gbody.appendChild(grid);
+    grp.appendChild(gbody);
+    scroll.appendChild(grp);
+  }
+  menu.appendChild(scroll);
+}
+
+/* ---------- 阿萨拉记牌器（卡牌结构：54 张 = 13 点数 × 4 花色 + 大小王） ---------- */
+// 花色后缀：4=黑桃 3=红桃 2=梅花 1=方块（图片路径为 images/poker/{code}.webp）
+const PK_SUIT = { 4: ['黑桃', '♠'], 3: ['红桃', '♥'], 2: ['梅花', '♣'], 1: ['方块', '♦'] };
+const PK_RANK_NAME = { 1: 'A', 11: 'J', 12: 'Q', 13: 'K' };
+const PK_TIER_DOT = { 1: '#188d14', 2: '#658bce', 3: '#9b61c8' };   // 2~10 绿 / JQK 蓝 / A 紫
+const pkTier = (rank) => rank === 1 ? 3 : (rank >= 11 && rank <= 13) ? 2 : 1;
+function pkGroups() {
+  const groups = [];
+  for (const rank of [14, 1, 13, 12, 11, 10, 9, 8, 7, 6, 5, 4, 3, 2]) {
+    if (rank === 14) {
+      groups.push({
+        label: '王', dot: 'linear-gradient(90deg,#cb464a 50%,#e8a64e 50%)',   // 大王红 / 小王金 各半
+        items: [{ code: '142', name: '大王', sym: '' }, { code: '141', name: '小王', sym: '' }],
+      });
+      continue;
+    }
+    const rc = String(rank).padStart(2, '0');
+    groups.push({
+      label: PK_RANK_NAME[rank] || String(rank),
+      dot: PK_TIER_DOT[pkTier(rank)],
+      items: [4, 3, 2, 1].map(s => ({ code: rc + s, name: PK_SUIT[s][0], sym: PK_SUIT[s][1], red: s === 3 || s === 1 })),
+    });
+  }
+  return groups;
+}
+const PK_ALL_CODES = new Set(pkGroups().flatMap(g => g.items.map(i => i.code)));
+let pkCollected = new Set();
+try {
+  pkCollected = new Set((JSON.parse(localStorage.getItem('deltabox_poker') || '[]')).filter(c => PK_ALL_CODES.has(c)));
+} catch (e) {}
+const pkPersist = () => localStorage.setItem('deltabox_poker', JSON.stringify([...pkCollected]));
+
+function buildPokerPanel(menu) {
+  const missMode = state.pokerMode === 'miss';
+
+  /* -- 头部：标题 + 收集进度 + 视图切换 / 清空 -- */
+  const head = el('div', 'sb-head pk-head', { [OD]: '' });
+  const titleRow = el('div', 'pk-title-row', { [OD]: '' });
+  titleRow.innerHTML = '<span class="pk-title">阿萨拉扑克牌</span><span class="pk-count"><b>0</b> / 54</span>';
+  const bar = el('div', 'pk-bar', { [OD]: '' });
+  bar.appendChild(el('i'));
+  const tools = el('div', 'pk-tools', { [OD]: '' });
+  const segAll = el('button', `pk-seg${missMode ? '' : ' on'}`, { type: 'button', [OD]: '' });
+  segAll.textContent = '全部';
+  const segMiss = el('button', `pk-seg${missMode ? ' on' : ''}`, { type: 'button', [OD]: '' });
+  segMiss.textContent = '未收集';
+  segAll.onclick = () => { if (!missMode) return; state.pokerMode = 'all'; persist(); buildSidebar(); };
+  segMiss.onclick = () => { if (missMode) return; state.pokerMode = 'miss'; persist(); buildSidebar(); };
+  const sp = el('span', 'sb-sp', { [OD]: '' });
+  const resetBtn = el('button', 'sb-btn pk-reset', { type: 'button', [OD]: '', title: '清空收集记录（再次点击确认）' });
+  resetBtn.textContent = '清空记录';
+  let resetTimer = null;
+  resetBtn.onclick = () => {
+    if (resetBtn.classList.contains('armed')) {   // 二次确认，防误触清空
+      clearTimeout(resetTimer);
+      pkCollected = new Set();
+      pkPersist();
+      buildSidebar();
+      return;
+    }
+    resetBtn.classList.add('armed');
+    resetBtn.textContent = '确认清空';
+    resetTimer = setTimeout(() => { resetBtn.classList.remove('armed'); resetBtn.textContent = '清空记录'; }, 2500);
+  };
+  tools.append(segAll, segMiss, sp, resetBtn);
+  head.append(titleRow, bar, tools);
+  menu.appendChild(head);
+
+  const scroll = el('div', 'sb-scroll', { [OD]: '' });
+  const groupOf = new Map();   // 分组元素 → 分组数据（计数刷新 / 整组隐藏用）
+  const refreshHead = () => {
+    head.querySelector('.pk-count b').textContent = pkCollected.size;
+    bar.firstChild.style.width = (pkCollected.size / 54 * 100).toFixed(1) + '%';
+  };
+  // 点击即切换收集态并增量更新（不重建面板，保留滚动位置）；
+  // 未收集视图下已收集卡片从列表移除，所在分组集齐时整组隐藏
+  function pkToggle(card, item) {
+    if (pkCollected.has(item.code)) pkCollected.delete(item.code);
+    else pkCollected.add(item.code);
+    pkPersist();
+    card.classList.toggle('on', pkCollected.has(item.code));
+    refreshHead();
+    refreshGroups();
+    if (missMode && pkCollected.has(item.code)) {
+      const grp = card.closest('.pk-grp');
+      card.remove();
+      if (grp && !grp.querySelector('.pk-card')) { grp.remove(); groupOf.delete(grp); }
+      if (pkCollected.size === 54) {
+        scroll.innerHTML = '';
+        scroll.appendChild(pkDoneEl());
+      }
+    }
+  }
+  // 分组计数：全部视图显示 已收/总数；未收集视图显示剩余张数
+  // （整组集齐时随分组移除同步从 groupOf 删除，此处不再按 isConnected 猜测——
+  //   buildSidebar 是最后才把侧栏挂进文档，构建期全部节点都是断开状态）
+  const refreshGroups = () => {
+    for (const [grp, g] of groupOf) {
+      const total = g.items.length;
+      const got = g.items.reduce((s, it) => s + (pkCollected.has(it.code) ? 1 : 0), 0);
+      const cnt = grp.querySelector('.pk-grp-cnt');
+      if (missMode) cnt.textContent = `缺 ${total - got}`;
+      else {
+        cnt.textContent = `${got}/${total}`;
+        grp.classList.toggle('done', got === total);
+      }
+    }
+  };
+  const pkDoneEl = () => {
+    const done = el('div', 'pk-done', { [OD]: '' });
+    done.innerHTML = '恭喜干员，已集齐全部卡牌<span>切换「全部」视图可查看收集记录</span>';
+    return done;
+  };
+  const mkCard = (item, rank) => {
+    const card = el('div', `pk-card${pkCollected.has(item.code) ? ' on' : ''}`, { [OD]: '' });
+    const img = el('img', null, { [OD]: '', src: `images/poker/${item.code}.webp`, alt: item.name, draggable: 'false' });
+    const t = el('div', 'pk-card-t', { [OD]: '' });
+    // 文案带点数（梅花3 / 黑桃A），大小王本身就是名称
+    t.innerHTML = (item.sym ? `<span class="${item.red ? 'pk-red' : ''}">${item.sym}</span>` : '') + esc(item.sym ? item.name + rank : item.name);
+    card.append(img, t);
+    return card;
+  };
+
+  if (missMode && pkCollected.size === 54) {
+    scroll.appendChild(pkDoneEl());
+  } else {
+    // 两种视图同为按点数分组（王组在最前）；
+    // 「未收集」仅隐藏已收集的卡片，整组集齐的分组不展示
+    for (const g of pkGroups()) {
+      const items = missMode ? g.items.filter(it => !pkCollected.has(it.code)) : g.items;
+      if (!items.length) continue;
+      const grp = el('div', 'pk-grp', { [OD]: '' });
+      groupOf.set(grp, g);
+      const gh = el('div', 'pk-grp-h', { [OD]: '' });
+      gh.innerHTML = `<span class="pk-dot" style="background:${g.dot}"></span>` +
+        `<span class="pk-rank">${g.label}</span><span class="pk-grp-cnt"></span>`;
+      grp.appendChild(gh);
+      const grid = el('div', 'pk-grid', { [OD]: '' });
+      for (const item of items) {
+        const card = mkCard(item, g.label);
+        card.onclick = () => pkToggle(card, item);
+        grid.appendChild(card);
+      }
+      grp.appendChild(grid);
+      scroll.appendChild(grp);
+    }
+  }
+  menu.appendChild(scroll);
+  refreshHead();
+  refreshGroups();
+}
+
+// 折叠把手与 Ctrl+Shift+H 快捷键共用同一条切换路径（主进程经 sidebar:toggle 推送）。
+function toggleSidebar() {
+  state.sidebarCollapsed = !state.sidebarCollapsed;
+  $('#map-menu')?.classList.remove('open');   // 触发器随侧栏收起，菜单同步关闭
+  $('#am-confirm')?.classList.remove('open'); // 确认卡依附开关，一并关闭
+  $('#cap-confirm')?.classList.remove('open');
+  $('#ns-confirm')?.classList.remove('open');
+  persist(); applyCollapse();
+}
+function applyCollapse() {
+  const wrap = $('#sidebar');
+  if (!wrap) return;
+  wrap.classList.toggle('is-hidden', state.sidebarCollapsed);
+  // 右上角定位状态提示随侧栏一起收回，只剩地图点位
+  document.body.classList.toggle('sidebar-collapsed', state.sidebarCollapsed);
+  const arrow = wrap.querySelector('.toggle-btn > span');
+  if (arrow) arrow.textContent = state.sidebarCollapsed ? '▶' : '◀';
+}
+function currentCatIds() {
+  const out = [];
+  for (const [, entries] of Object.entries(D.catalog))
+    for (const entry of entries) if (catAvailable(entry)) out.push(entry.id);
+  return out;
+}
+function buildTile(entry) {
+  const tile = el('div', `sb-tile${state.activeCats.has(entry.id) ? ' on' : ''}`, { [OD]: '', 'data-category': entry.id, title: D.names[entry.id] || entry.id });
+  const cnt = el('span', 'sb-t-cnt');
+  cnt.textContent = catCount(entry.id);
+  const img = el('img', 'sb-t-img', { [OD]: '', src: iconSrc(entry.id), alt: D.names[entry.id] || entry.id });
+  const name = el('div', 'sb-t-name', { [OD]: '' });
+  name.textContent = D.names[entry.id] || entry.id;
+  tile.appendChild(cnt);
+  tile.appendChild(img);
+  if (entry.extra && D.badges[entry.extra]) {
+    const badge = el('span', 'sb-t-ex');
+    badge.style.backgroundColor = { fs: '#52c41a', hd: '#1677ff', sj: '#722ed1', yg: '#fa8c16', tc: '#faad14' }[entry.extra] || '#faad14';
+    badge.textContent = D.badges[entry.extra];
+    tile.appendChild(badge);
+  }
+  tile.appendChild(name);
+  tile.onclick = () => {
+    updateCategories([entry.id], !state.activeCats.has(entry.id));
+  };
+  return tile;
+}
+/* ---------- 重要收集页 ---------- */
+function buildCollectPanel(menu) {
+  const scroll = el('div', 'sb-bz-scroll', { [OD]: '' });
+  const tjRow = el('div', 'sb-row sb-tj-row', { [OD]: '' });
+  renderTangjiCard(tjRow);
+  scroll.appendChild(tjRow);
+  menu.appendChild(scroll);
+}
+/* ---------- 重要收集页：长弓溪谷 - 唐吉彩蛋收集品记录 ----------
+   需求数量读 D.catalog 中 lt_cgxg_tj 点位的 collections；物品名称与获取容器/模式
+   由本地静态表提供，附图位于 images/collection/{cid}.webp。
+   收集进度存 localStorage，换浏览器/设备不跟随。 */
+const TJ_POINT_ID = 'lt_cgxg_tj';
+const TJ_LABEL = '<div class="sb-code-l">EASTER EGG<span>长弓溪谷 · 唐吉彩蛋 · 阿萨拉一号</span></div>';
+const TJ_ITEMS = {
+  j_gxnrl: { name: '高性能燃油', from: { itemId: ['jbc', 'dsb', 'ljx', 'gjg', 'cnw', 'hkcwx', 'rlb', 'fsflx', 'fsxcwx', 'hrlbb', 'flt'], mode: ['jimi', 'juemi'] } },
+  j_clq: { name: '处理器', from: { itemId: ['hkcwx', 'dwqx'], mode: ['jimi', 'juemi'] } },
+  z_dnzb: { name: '电脑主板', from: { itemId: ['fwq', 'dnjx'], mode: ['pt', 'jimi', 'juemi'] } },
+  z_sj: { name: '手锯', from: { itemId: ['jbc', 'gjg', 'hkcwx', 'fsflx', 'fsxcwx', 'hrlbb'], mode: ['pt', 'jimi', 'juemi'] } },
+  z_fsq: { name: '粉碎钳', from: { itemId: ['jbc', 'gjg', 'hkcwx', 'fsflx', 'fsxcwx', 'hrlbb'], mode: ['pt', 'jimi', 'juemi'] } },
+  l_jdq: { name: '继电器', from: { itemId: ['fwq', 'snh'], mode: ['pt', 'jimi', 'juemi'] } },
+  z_jyx: { name: '聚乙烯', from: { itemId: ['hkcwx'], mode: ['jimi', 'juemi'] } },
+  z_tzg: { name: '特种钢', from: { itemId: ['hkcwx', 'dwqx'], mode: ['jimi', 'juemi'] } },
+};
+let tjCounts = {};
+try {
+  const saved = JSON.parse(localStorage.getItem('deltabox_tangji') || '{}');
+  if (saved && typeof saved === 'object') tjCounts = saved;
+} catch (e) {}
+const tjPersist = () => localStorage.setItem('deltabox_tangji', JSON.stringify(tjCounts));
+// 需求清单：catalog 缺 collections 时返回空数组（卡内显示占位）；未知 cid 显示「未知收集品」
+function tjRequired() {
+  const entry = (D.catalog.lt || []).find(it => it && it.id === TJ_POINT_ID);
+  const cols = entry && entry.collections;
+  if (!cols) return [];
+  return Object.entries(cols).map(([cid, spec]) => ({
+    cid,
+    count: Math.max(0, Number(spec && spec.count) || 0),
+    name: TJ_ITEMS[cid] ? TJ_ITEMS[cid].name : '未知收集品',
+    from: TJ_ITEMS[cid] ? TJ_ITEMS[cid].from : null,
+  }));
+}
+// 容器信息：名称取 D.names，所在地图取 D.catalog 条目 mapSelects（缺省 = 全图皆有）
+function tjContainerInfo(id) {
+  let maps = null;
+  for (const arr of Object.values(D.catalog)) {
+    const hit = (arr || []).find(e => e && e.id === id);
+    if (hit) { maps = hit.mapSelects || null; break; }
+  }
+  return { name: D.names[id] || id, maps: (maps || []).map(k => (D.mapConf[k] && D.mapConf[k].name) || k) };
+}
+function renderTangjiCard(row) {
+  row.innerHTML = '';
+  const card = el('div', 'sb-tj', { [OD]: '' });
+  const reqs = tjRequired();
+  if (!reqs.length) {
+    card.innerHTML = `${TJ_LABEL}<div class="sb-tj-none">暂无收集品数据</div>`;
+    row.appendChild(card);
+    return;
+  }
+  // 只保留当前需求内的进度键（静默清理已失效的收集记录）
+  const valid = reqs.filter(r => r.count > 0);
+  for (const k of Object.keys(tjCounts)) {
+    if (!valid.some(r => r.cid === k)) delete tjCounts[k];
+  }
+  const needSum = valid.reduce((s, r) => s + r.count, 0);
+  const gotSum = () => valid.reduce((s, r) => s + Math.min(Number(tjCounts[r.cid]) || 0, r.count), 0);
+
+  const head = el('div', 'sb-tj-head', { [OD]: '' });
+  head.innerHTML = `${TJ_LABEL}<div class="sb-tj-meta">已收 <b>0</b> / ${needSum}</div>`;
+  card.appendChild(head);
+  const bar = el('div', 'sb-tj-bar', { [OD]: '' });
+  bar.appendChild(el('i'));
+  card.appendChild(bar);
+  const refreshHead = () => {
+    const got = gotSum();
+    head.querySelector('.sb-tj-meta b').textContent = got;
+    bar.firstChild.style.width = (needSum ? got / needSum * 100 : 0).toFixed(1) + '%';
+    card.classList.toggle('done', got === needSum && needSum > 0);
+  };
+
+  for (const req of valid) {
+    const item = el('div', 'sb-tj-item', { [OD]: '' });
+    const fig = el('div', 'sb-tj-fig', { [OD]: '', title: '点击切换收集状态' });
+    const img = el('img', null, { [OD]: '', src: `images/collection/${req.cid}.webp`, alt: req.name, draggable: 'false' });
+    fig.appendChild(img);
+    const body = el('div', 'sb-tj-body', { [OD]: '' });
+    const l1 = el('div', 'sb-tj-l1', { [OD]: '' });
+    const name = el('span', 'sb-tj-name', { [OD]: '', title: `${req.name}（点击切换收集状态）` });
+    name.textContent = req.name;
+    const step = el('div', 'sb-tj-step', { [OD]: '' });
+    const minus = el('button', null, { type: 'button', [OD]: '', title: '减少', tabindex: '-1' });
+    minus.textContent = '−';
+    const cnt = el('span', 'sb-tj-cnt');
+    const plus = el('button', null, { type: 'button', [OD]: '', title: '增加', tabindex: '-1' });
+    plus.textContent = '＋';
+    step.append(minus, cnt, plus);
+    l1.append(name, step);
+    const l2 = el('div', 'sb-tj-l2', { [OD]: '' });
+    const modeInfo = el('span', 'sb-tj-mode');
+    modeInfo.textContent = (req.from && req.from.mode)
+      ? `模式：${req.from.mode.map(m => D.modeNames[m] || m).join('、')}` : '模式：不限';
+    const srcBtn = el('button', 'sb-txtbtn sb-tj-srcbtn', { type: 'button', [OD]: '', title: '查看获取来源容器' });
+    srcBtn.textContent = '容器 ▾';
+    l2.append(modeInfo, srcBtn);
+    body.append(l1, l2);
+
+    const src = el('div', 'sb-tj-src', { [OD]: '' });
+    if (req.from && Array.isArray(req.from.itemId)) {
+      for (const boxId of req.from.itemId) {
+        const info = tjContainerInfo(boxId);
+        const box = el('span', 'sb-tj-box', { [OD]: '', title: info.maps.length ? `仅 ${info.maps.join('、')}` : '全图皆有' });
+        const bi = el('img', null, { [OD]: '', src: iconSrc(boxId), alt: info.name, draggable: 'false' });
+        const bn = el('span', 'sb-tj-box-n');
+        bn.textContent = info.name;
+        box.append(bi, bn);
+        if (info.maps.length) {
+          const bm = el('span', 'sb-tj-box-m');
+          bm.textContent = info.maps.join('/');
+          box.appendChild(bm);
+        }
+        src.appendChild(box);
+      }
+    } else {
+      src.innerHTML = '<span class="sb-tj-box-n">暂无来源数据</span>';
+    }
+
+    const refreshItem = () => {
+      const got = Math.min(Number(tjCounts[req.cid]) || 0, req.count);
+      cnt.textContent = `${got}/${req.count}`;
+      item.classList.toggle('done', got >= req.count);
+      minus.disabled = got <= 0;
+      plus.disabled = got >= req.count;
+      refreshHead();
+    };
+    const tjSet = (n) => {
+      const v = Math.max(0, Math.min(req.count, n));
+      if (v > 0) tjCounts[req.cid] = v;
+      else delete tjCounts[req.cid];   // 清零即删键，存储里不留 0 值堆积
+      tjPersist();
+      refreshItem();
+    };
+    fig.onclick = () => tjSet(item.classList.contains('done') ? 0 : req.count);
+    name.onclick = () => tjSet(item.classList.contains('done') ? 0 : req.count);
+    minus.onclick = () => tjSet((Number(tjCounts[req.cid]) || 0) - 1);
+    plus.onclick = () => tjSet((Number(tjCounts[req.cid]) || 0) + 1);
+    srcBtn.onclick = () => {
+      const open = item.classList.toggle('src-open');
+      srcBtn.textContent = open ? '容器 ▴' : '容器 ▾';
+    };
+    item.append(fig, body, src);
+    card.appendChild(item);
+    refreshItem();
+  }
+
+  const note = el('div', 'sb-tj-note', { [OD]: '' });
+  note.innerHTML = '非绑定物品<span class="sb-sp"></span>';
+  const resetBtn = el('button', 'sb-txtbtn sb-tj-reset', { type: 'button', [OD]: '', title: '清空收集记录（再次点击确认）' });
+  resetBtn.textContent = '清空记录';
+  let resetTimer = null;
+  resetBtn.onclick = () => {
+    if (resetBtn.classList.contains('armed')) {   // 二次确认，防误触清空（同记牌器）
+      clearTimeout(resetTimer);
+      tjCounts = {};
+      tjPersist();
+      renderTangjiCard(row);
+      return;
+    }
+    resetBtn.classList.add('armed');
+    resetBtn.textContent = '确认清空';
+    resetTimer = setTimeout(() => { resetBtn.classList.remove('armed'); resetBtn.textContent = '清空记录'; }, 2500);
+  };
+  note.appendChild(resetBtn);
+  card.appendChild(note);
+  row.appendChild(card);
+  refreshHead();
+}
+/* ---------- 关于页：快捷键 / 版本信息 / 推广 / 作者信息 / 打赏作者 / 想说的话 / 特殊功能 ----------
+   内容源是 gitee 内容仓（coolc/delta-box-about）的 about.json，主进程的
+   about-updater 每次启动都拉取并经 about:update 推送（aboutRemote）；
+   下面的 ABOUT_* 常量是各分节的本地兜底文案——远端缺失或校验不过的分节
+   逐项回退到这里。当前版本来自主进程（package.json）；最新版本/更新时间
+   由主进程经 version:update 推送（启动强校验 + 每 10 分钟静默轮询），
+   也可点「检查更新」手动重查。 */
+const ABOUT_WORDS = [
+  '三角洲鼠鼠导航是一款免费的《三角洲行动》物资点位叠加工具，数据整理自公开的地图工具站，全部功能不设付费墙。',
+  '工具由个人在业余时间维护，更新与数据同步难免滞后；遇到点位缺失或识别不准欢迎反馈，也可以参考仓库文档自行同步最新数据。',
+  '祝各位干员把把出红，撤离顺利。',
+];
+const ABOUT_AUTHOR = { name: '待补充', rows: [['抖音', '待补充'], ['企鹅群', '待补充']] };
+const ABOUT_AD = { text: '欢迎入驻~' };
+const ABOUT_SPONSOR = { note: '如果这个工具对你有帮助，可以请作者喝杯咖啡。', qr: 'images/about/sponsor-qr.png' };
+// 关于页跳转（内置兜底链接）：作者信息行可带第三元素 https 链接（内容仓远程
+// 管理，远端优先），远端未带时「抖音」行/键含「群」的行按行键兜底到这里。
+// 经 openExternal 桥走主进程 ShellExecute（系统默认浏览器，仅放行 https）。
+const ABOUT_LINKS = {
+  author: 'https://www.douyin.com/user/MS4wLjABAAAAa7wO_DmsgMF1-ktqZiwaqkmTCNrfqaUv7Iof7p_p-z8',
+  group: null,
+};
+// 远端内容（主进程 about:update 推送的快照）；null = 尚未收到，全用兜底文案。
+let aboutRemote = null;
+// 分节解析：远端字段合法即覆盖对应兜底，否则整节回退兜底。
+function aboutData() {
+  const r = aboutRemote;
+  const words = r && Array.isArray(r.words) && r.words.length && r.words.every(w => typeof w === 'string' && w)
+    ? r.words : ABOUT_WORDS;
+  const author = r && r.author && typeof r.author === 'object' && typeof r.author.name === 'string' && r.author.name
+    ? { name: r.author.name,
+        // 行为 [键, 值] 或 [键, 值, https链接]；链接非法则整节回退兜底（与主进程同口径）
+        rows: Array.isArray(r.author.rows) && r.author.rows.every(x => Array.isArray(x) &&
+            (x.length === 2 ||
+              (x.length === 3 && typeof x[2] === 'string' && x[2].startsWith('https://'))))
+          ? r.author.rows : ABOUT_AUTHOR.rows }
+    : ABOUT_AUTHOR;
+  const sponsor = r && r.sponsor && typeof r.sponsor === 'object' && typeof r.sponsor.note === 'string' && r.sponsor.note
+    ? { note: r.sponsor.note,
+        // 远端 qr 是内容仓内相对路径，本地副本固定落在 images/about/ 下取文件名
+        qr: typeof r.sponsor.qr === 'string' && r.sponsor.qr
+          ? `images/about/${r.sponsor.qr.split('/').pop()}` : ABOUT_SPONSOR.qr }
+    : ABOUT_SPONSOR;
+  const ad = r && r.ad && typeof r.ad === 'object' && typeof r.ad.text === 'string' && r.ad.text
+    ? { text: r.ad.text } : ABOUT_AD;
+  return { words, author, sponsor, ad };
+}
+// 会话内缓存：current=当前版本（主进程返回），status=最新版本检查状态，
+// released=最新版本上架时间（版本卡「更新时间」行）。
+const aboutVersion = { current: null, status: 'idle', latest: null, released: null };
+function cmpVersion(a, b) {
+  const pa = String(a).split('.'), pb = String(b).split('.');
+  // 与宿主启动强校验一致：只比较主/次版本，忽略修订号及后续段。
+  const number = part => /^\d+$/.test(part || '') ? (part.replace(/^0+/, '') || '0') : '0';
+  for (let i = 0; i < 2; i++) {
+    const va = number(pa[i]), vb = number(pb[i]);
+    if (va.length !== vb.length) return va.length > vb.length ? 1 : -1;
+    if (va !== vb) return va > vb ? 1 : -1;
+  }
+  return 0;
+}
+// 检查最新版本：结果落进 aboutVersion，由 refreshAboutVersionView 回填 DOM
+// （面板可能被 buildSidebar 重建，回填按 class 查询，节点不在时静默跳过）。
+function runAboutCheck() {
+  if (!window.overlay?.checkUpdate) { aboutVersion.status = 'unavailable'; return; }
+  if (aboutVersion.status === 'checking') return;
+  aboutVersion.status = 'checking';
+  refreshAboutVersionView();
+  window.overlay.checkUpdate().then(res => {
+    if (res && res.status === 'ok') {
+      aboutVersion.status = 'ok';
+      aboutVersion.latest = res.latest;
+      aboutVersion.released = res.released_at || null;
+    } else {
+      aboutVersion.status = (res && res.status) || 'failed';
+    }
+  }).catch(() => { aboutVersion.status = 'failed'; })
+    .finally(refreshAboutVersionView);
+}
+// 主进程推送 version:update（启动强校验与每 10 分钟静默轮询的结果）后：静默
+// 刷新版本格，不弹任何提示；失败载荷直接忽略（保留上次已知状态，不打扰显示）。
+function applyVersionUpdate(info) {
+  if (!info || info.status !== 'ok' || !info.latest) return;
+  aboutVersion.status = 'ok';
+  aboutVersion.latest = info.latest;
+  aboutVersion.released = info.released_at || null;
+  refreshAboutVersionView();
+}
+// 版本格回填：scope 传版本卡元素时在其中查找（构建期面板尚未挂进文档，
+// 直接用节点引用；见 buildSidebar 末尾才 appendChild 的口径），异步回调用
+// document 查询当前在文档里的卡。
+function refreshAboutVersionView(scope) {
+  const q = (cls) => (scope || document).querySelector(scope ? `.${cls}` : `#sidebar .${cls}`);
+  const cur = q('sb-ab-cur');
+  const lat = q('sb-ab-latest');
+  const rel = q('sb-ab-rel');
+  const btn = q('sb-ab-check');
+  if (cur) cur.textContent = aboutVersion.current ? `v${aboutVersion.current}` : '--';
+  if (rel) rel.textContent = aboutVersion.status === 'ok' ? (aboutVersion.released || '--') : '--';
+  if (lat) {
+    let text = '未检查', cls = '';
+    switch (aboutVersion.status) {
+      case 'checking': text = '检查中…'; break;
+      case 'ok': {
+        const v = aboutVersion.latest || '';
+        if (!aboutVersion.current) { text = v ? `v${v}` : '--'; break; }
+        if (cmpVersion(v, aboutVersion.current) > 0) { text = `v${v} · 可更新`; cls = 'new'; }
+        else { text = '已是最新'; cls = 'ok'; }
+        break;
+      }
+      case 'failed': text = '获取失败'; cls = 'err'; break;
+      case 'unconfigured': text = '未配置更新源'; break;
+      case 'unavailable': text = '--'; break;
+    }
+    lat.textContent = text;
+    lat.className = `sb-ab-v sb-ab-latest ${cls}`.trim();
+  }
+  if (btn) {
+    const busy = aboutVersion.status === 'checking';
+    btn.disabled = busy;
+    btn.textContent = busy ? '检查中…' : '检查更新';
+  }
+}
+function buildAboutPanel(menu) {
+  // 先定型版本检查状态再渲染（renderAboutCards 末尾按节点引用回填版本格），
+  // 避免首帧显示「未检查」后无人刷新。
+  if (aboutVersion.current === null && window.overlay?.getVersion) {
+    window.overlay.getVersion().then(v => {
+      if (typeof v === 'string' && v) aboutVersion.current = v;
+    }).catch(() => {}).finally(() => refreshAboutVersionView());
+  }
+  if (aboutVersion.status === 'idle') runAboutCheck();   // 每次会话首次打开关于页时自动查一次
+  const scroll = el('div', 'sb-ab-scroll', { [OD]: '' });
+  renderAboutCards(scroll);
+  menu.appendChild(scroll);
+}
+// 内容卡构建（版本卡 + 四张内容卡）；返回版本卡元素供构建期版本格回填。
+// buildAboutPanel 与 applyAboutUpdate 共用：远端内容到达时在既有 scroll 里
+// 原位重绘，不打扰侧栏其余部分（版本检查状态存 aboutVersion，不受重建影响）。
+function renderAboutCards(scroll) {
+  const data = aboutData();
+
+  /* -- 快捷键卡（版本信息之上）：全局热键由主进程 RegisterHotKey 注册 -- */
+  const hkCard = el('div', 'sb-ab', { [OD]: '' });
+  hkCard.innerHTML = '<div class="sb-ab-head"><div class="sb-ab-l">SHORTCUTS<span>快捷键</span></div></div>';
+  for (const [action, keys] of [
+    ['折叠 / 展开侧栏', 'Ctrl + Shift + H'],
+    ['退出程序', 'Ctrl + Shift + Q'],
+  ]) {
+    const r = el('div', 'sb-ab-row', { [OD]: '' });
+    r.innerHTML = `<span class="sb-ab-k">${esc(action)}</span><span class="sb-ab-v sb-ab-key">${esc(keys)}</span>`;
+    hkCard.appendChild(r);
+  }
+  scroll.appendChild(hkCard);
+
+  /* -- 版本信息卡：当前版本 + 最新版本（右侧文字按钮手动重查） -- */
+  const verCard = el('div', 'sb-ab', { [OD]: '' });
+  const verHead = el('div', 'sb-ab-head', { [OD]: '' });
+  verHead.innerHTML = '<div class="sb-ab-l">VERSION<span>版本信息</span></div>';
+  const checkBtn = el('button', 'sb-txtbtn sb-ab-check', { type: 'button', [OD]: '', title: '向更新源重新查询最新版本' });
+  checkBtn.textContent = '检查更新';
+  checkBtn.onclick = () => runAboutCheck();
+  verHead.appendChild(checkBtn);
+  const curRow = el('div', 'sb-ab-row', { [OD]: '' });
+  curRow.innerHTML = '<span class="sb-ab-k">当前版本</span><span class="sb-ab-v sb-ab-cur"></span>';
+  const latRow = el('div', 'sb-ab-row', { [OD]: '' });
+  latRow.innerHTML = '<span class="sb-ab-k">最新版本</span><span class="sb-ab-v sb-ab-latest"></span>';
+  const relRow = el('div', 'sb-ab-row',
+    { [OD]: '', title: '最新版本的上架时间（内容仓 about.json 的 released_at，非本机拉取时间）' });
+  relRow.innerHTML = '<span class="sb-ab-k">更新时间</span><span class="sb-ab-v sb-ab-rel">--</span>';
+  verCard.append(verHead, curRow, latRow, relRow);
+  scroll.appendChild(verCard);
+
+  /* -- 推广：入驻文案（有投放时改 ad.text，可带联系方式） -- */
+  const adCard = el('div', 'sb-ab', { [OD]: '' });
+  adCard.innerHTML = '<div class="sb-ab-head"><div class="sb-ab-l">PROMO<span>推广</span></div></div>';
+  const adText = el('div', 'sb-ab-p', { [OD]: '' });
+  adText.textContent = data.ad.text;
+  adCard.appendChild(adText);
+  scroll.appendChild(adCard);
+
+  /* -- 作者信息（不显示「作者」名行）：行值可点击跳转——链接优先取远端行
+         第三元素，未带时「抖音」行/键含「群」的行兜底内置 ABOUT_LINKS -- */
+  const auCard = el('div', 'sb-ab', { [OD]: '' });
+  auCard.innerHTML = '<div class="sb-ab-head"><div class="sb-ab-l">AUTHOR<span>作者信息</span></div></div>';
+  for (const row of data.author.rows) {
+    const [k, v] = row;
+    const r = el('div', 'sb-ab-row', { [OD]: '' });
+    const link = row.length === 3 ? row[2]
+      : (k === '抖音' ? ABOUT_LINKS.author : (k.includes('群') ? ABOUT_LINKS.group : null));
+    r.innerHTML = `<span class="sb-ab-k">${esc(k)}</span>`;
+    if (link) {
+      const val = el('span', 'sb-ab-v txt sb-ab-link',
+        { [OD]: '', role: 'link', tabindex: '0',
+          title: k === '抖音' ? '打开作者抖音主页' : (k.includes('群') ? '打开加群链接' : '打开链接') });
+      val.textContent = v;
+      val.onclick = () => window.overlay?.openExternal?.(link);
+      val.onkeydown = (e) => {
+        if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); window.overlay?.openExternal?.(link); }
+      };
+      r.appendChild(val);
+    } else {
+      const val = el('span', 'sb-ab-v txt', { [OD]: '' });
+      val.textContent = v;
+      r.appendChild(val);
+    }
+    auCard.appendChild(r);
+  }
+  scroll.appendChild(auCard);
+
+  /* -- 打赏作者：说明 + 二维码（本地副本缺失时占位提示） -- */
+  const spCard = el('div', 'sb-ab', { [OD]: '' });
+  spCard.innerHTML = '<div class="sb-ab-head"><div class="sb-ab-l">DONATE<span>打赏作者</span></div></div>';
+  const spNote = el('div', 'sb-ab-p', { [OD]: '' });
+  spNote.textContent = data.sponsor.note;
+  spCard.appendChild(spNote);
+  const qrBox = el('div', 'sb-ab-qr', { [OD]: '' });
+  const qrImg = el('img', null, { [OD]: '', src: `${ASSETS}${data.sponsor.qr}`, alt: '打赏二维码', draggable: 'false' });
+  qrImg.onerror = () => {
+    const ph = el('div', 'sb-ab-qr-ph');
+    ph.textContent = '二维码待补充';
+    qrImg.replaceWith(ph);
+  };
+  qrBox.appendChild(qrImg);
+  spCard.appendChild(qrBox);
+  scroll.appendChild(spCard);
+
+  /* -- 想说的话 -- */
+  const wordsCard = el('div', 'sb-ab', { [OD]: '' });
+  wordsCard.innerHTML = '<div class="sb-ab-head"><div class="sb-ab-l">WORDS<span>想说的话</span></div></div>';
+  for (const p of data.words) {
+    const pe = el('div', 'sb-ab-p', { [OD]: '' });
+    pe.textContent = p;
+    wordsCard.appendChild(pe);
+  }
+  scroll.appendChild(wordsCard);
+
+  /* -- 特殊功能（想说的话之下）：直播/录屏模式开关。开启后叠加层与点位对直播/
+         录屏画面不可见（恒排除捕获）；开启需在确认卡点「确定」（提示即说明），
+         关闭直接允许录屏捕获 -- */
+  const stCard = el('div', 'sb-ab', { [OD]: '' });
+  stCard.innerHTML = '<div class="sb-ab-head"><div class="sb-ab-l">FEATURES<span>特殊功能</span></div></div>';
+  const stRow = el('div', 'sb-ab-row',
+    { [OD]: '', title: '开启后本窗口与点位在直播/录屏画面中不可见（不可捕获）；关闭后允许捕获，与游戏是否运行无关' });
+  stRow.innerHTML = '<span class="sb-ab-k">直播 / 录屏模式</span>';
+  const stSw = el('div', `sb-sw${state.streamHide ? ' on' : ''}`,
+    { id: 'stream-hide-switch', role: 'switch', 'aria-checked': String(state.streamHide),
+      'aria-disabled': String(state.desktopCapture), tabindex: state.desktopCapture ? '-1' : '0',
+      title: state.desktopCapture ? '桌面采集已开启，直播/录屏模式保持开启' : '直播/录屏模式' });
+  const stToggle = () => toggleStreamHide();
+  stSw.onclick = stToggle;
+  stSw.onkeydown = (e) => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); stToggle(); }
+  };
+  stRow.appendChild(stSw);
+  stCard.appendChild(stRow);
+  const desktopRow = el('div', 'sb-ab-row',
+    { [OD]: '', title: '开启后使用桌面采集，并自动开启及锁定直播/录屏模式；关闭后优先采集游戏窗口，直播/录屏模式自动关闭并恢复操作' });
+  desktopRow.innerHTML = '<span class="sb-ab-k">桌面采集</span>';
+  const desktopSw = el('div', `sb-sw${state.desktopCapture ? ' on' : ''}`,
+    { id: 'desktop-capture-switch', role: 'switch', 'aria-checked': String(state.desktopCapture), tabindex: '0' });
+  desktopSw.onclick = toggleDesktopCapture;
+  desktopSw.onkeydown = e => {
+    if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); toggleDesktopCapture(); }
+  };
+  desktopRow.appendChild(desktopSw);
+  stCard.appendChild(desktopRow);
+  scroll.appendChild(stCard);
+
+  refreshAboutVersionView(verCard);   // 构建期面板可能尚未挂进文档，按节点引用直接回填
+  return verCard;
+}
+// 主进程推送关于内容（about:update）后：记录远端快照；关于页正显示时在既有
+// scroll 里原位重绘内容卡（版本检查状态保持不动）。
+function applyAboutUpdate(data) {
+  if (!data || typeof data !== 'object') return;
+  aboutRemote = data;
+  if (state.sidebarTab !== 'about') return;
+  const scroll = document.querySelector('#sidebar .sb-ab-scroll');
+  if (!scroll) return;
+  scroll.innerHTML = '';
+  renderAboutCards(scroll);
+}
+/* ---------- 局内任务：展开顺序、模式过滤、概率映射与展示名 ---------- */
+const TASK_ODDS_PCT = { di: 25, gao: 80, zh: 50, gu: 100, yc: 100 };
+const TASK_ODDS_NAME = { di: '较低', gao: '较高', zh: '一般', gu: '必刷', yc: '隐藏' };
+const TASK_ORDER = ['az3_紧急停堆', 'az3_天下无核', 'htjd_飞升者行动', 'htjd_焰火行动',
+  'lhdb_破壁者行动', 'lhdb_硬通货', 'lhdb_夜莺行动', 'lhdb_破坏物资室铁门',
+  'cgxg_铁穹行动', 'cgxg_悬赏破浪', 'cgxg_黄金鸟窝', 'bks_庇护者行动', 'bks_折翼行动',
+  '淘汰高价值目标', '清理目标区域敌人', '破坏物资室铁门', '获取保险柜物资'];
+const TASK_TITLES = {
+  'az3_紧急停堆': '【紧急停堆】', 'az3_天下无核': '【天下无核】',
+  'htjd_飞升者行动': '【飞升者行动】', 'htjd_焰火行动': '【焰火行动】',
+  'lhdb_破壁者行动': '【破壁者行动】', 'lhdb_硬通货': '【硬通货】', 'lhdb_夜莺行动': '【夜莺行动】',
+  'lhdb_破坏物资室铁门': '【破坏物资室铁门】(特殊任务)',
+  'cgxg_铁穹行动': '【铁穹行动】', 'cgxg_悬赏破浪': '【悬赏：破浪】', 'cgxg_黄金鸟窝': '【黄金鸟窝】',
+  'bks_庇护者行动': '【庇护者行动】', 'bks_折翼行动': '【折翼行动】',
+  '淘汰高价值目标': '【淘汰高价值目标】', '清理目标区域敌人': '【清理目标区域敌人】',
+  '破坏物资室铁门': '【破坏物资室铁门】', '获取保险柜物资': '【获取保险柜物资】',
+};
+// 按全局配置表顺序遍历，跳过不含当前模式的任务；未知任务排在其后（稳定排序保持数据顺序）
+function expandTasks(tasks) {
+  const rank = (k) => { const i = TASK_ORDER.indexOf(k); return i < 0 ? TASK_ORDER.length : i; };
+  return Object.keys(tasks)
+    .sort((a, b) => rank(a) - rank(b))
+    .filter(k => { const t = tasks[k]; return !t.mode || t.mode.includes(state.mode); })
+    .map(k => ({ id: k, odds: tasks[k].odds }));
+}
+function renderTaskPop() {
+  const anchor = document.querySelector('.sb-task-anchor');
+  const pop = $('#task-pop');
+  if (!anchor || !pop) return;
+  anchor.classList.toggle('open', state.tasksOpen);
+  const btn = anchor.querySelector('.sb-btn');
+  if (btn) btn.setAttribute('aria-expanded', String(state.tasksOpen));
+  pop.innerHTML = '';
+  if (!state.tasksOpen) return;
+  const list = expandTasks(D.mapConf[state.map].tasks || {});
+  if (!list.length) {
+    const empty = el('div', 'tp-empty');
+    empty.textContent = '当前地图暂无局内任务';
+    pop.appendChild(empty);
+    return;
+  }
+  const head = el('div', 'tp-head');
+  const headTask = el('span'); headTask.textContent = '任务';
+  const headOdds = el('span'); headOdds.textContent = '刷新概率';
+  head.append(headTask, headOdds);
+  pop.appendChild(head);
+  for (const t of list) {
+    const item = el('div', 'tp-item');
+    const name = el('div', 'tp-name');
+    name.textContent = TASK_TITLES[t.id] || `【${t.id.replace(/^[a-z]{3,5}_/, '')}】`;
+    const line = el('div', 'tp-line');
+    const bar = el('div', 'tp-bar');
+    const fill = el('i');
+    fill.style.width = (TASK_ODDS_PCT[t.odds] ?? 0) + '%';
+    bar.appendChild(fill);
+    const odds = el('span', `tp-odds k-${t.odds}`);
+    odds.textContent = TASK_ODDS_NAME[t.odds] || t.odds;
+    line.append(bar, odds);
+    item.append(name, line);
+    pop.appendChild(item);
+  }
+}
+// 点击侧栏任务行以外区域时收起（穿透状态下点击落在游戏里，面板保留到下次交互）
+document.addEventListener('click', (e) => {
+  if (!state.tasksOpen) return;
+  const anchor = document.querySelector('.sb-task-anchor');
+  if (anchor && !anchor.contains(e.target)) { state.tasksOpen = false; renderTaskPop(); }
+});
+
+/* ---------- 地图渲染 ---------- */
+let hitPoints = [];
+const categoryNodes = new Map();
+function buildCategoryNodes(catId) {
+  const layer = el('div', 'marker-category', { 'data-category': catId });
+  layer.style.cssText = 'position:absolute;inset:0;pointer-events:none';
+  const svg = document.createElementNS('http://www.w3.org/2000/svg', 'g');
+  svg.dataset.category = catId;
+  const hits = [];
+  const data = D.maps[state.map];
+  const worldSvg = $('#world-svg');
+  // 1) 圆圈与路线（SVG 世界坐标层）——默认隐藏，悬停对应点位时显示（show:true 的常显）
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const setHidden = (n, show) => { if (show !== true) n.style.display = 'none'; else n.dataset.always = '1'; };
+  for (const [categoryId, arr] of Object.entries({ [catId]: data.Points[catId] || [] })) {
+    if (!state.activeCats.has(categoryId)) continue;
+    for (const p of arr) {
+      if (!pointVisible(p)) continue;
+      const pk = p.x + '_' + p.y;
+      if (p.circle) for (const c of p.circle) {
+        // 关联区域圈：旋转刻度虚线圈 + 中心十字准星（主题样式见 route/ring 段）。
+        // isItemXy=true 时圆心取点位自身坐标，
+        // 此时数据里省略 x/y，点位挪动圈随动。
+        const r = c.radius || 80;
+        const cx = c.isItemXy ? p.x : c.x, cy = c.isItemXy ? p.y : c.y;
+        const ci = document.createElementNS(svgNS, 'circle');
+        ci.setAttribute('cx', cx); ci.setAttribute('cy', cy);
+        ci.setAttribute('r', r);
+        ci.setAttribute('class', 'ring-area');
+        ci.dataset.pk = pk;
+        setHidden(ci, c.show);
+        svg.appendChild(ci);
+        const r0 = r * .15, r1 = r * .38;
+        const cr = document.createElementNS(svgNS, 'path');
+        cr.setAttribute('d', `M${cx} ${cy - r0} V${cy - r1} M${cx} ${cy + r0} V${cy + r1} M${cx - r0} ${cy} H${cx - r1} M${cx + r0} ${cy} H${cx + r1}`);
+        cr.setAttribute('class', 'ring-cross');
+        cr.dataset.pk = pk;
+        setHidden(cr, c.show);
+        svg.appendChild(cr);
+      }
+      if (p.line) for (const l of p.line) {
+        // selfStart=true 时将点位自身坐标插入路线开头作为起点，
+        // 因此顶点数检查必须在前插之后（selfStart + 单顶点也是合法路线）
+        const pts = l.selfStart ? [{ x: p.x, y: p.y }, ...l.point] : l.point;
+        if (!pts || pts.length < 2) continue;
+        const d = pts.map((pt, i) => (i ? 'L' : 'M') + pt.x + ' ' + pt.y).join(' ');
+        const mk = (tag, cls) => {
+          const n = document.createElementNS(svgNS, tag);
+          n.setAttribute('class', cls);
+          n.dataset.pk = pk;
+          setHidden(n, l.show);
+          svg.appendChild(n);
+          return n;
+        };
+        mk('path', 'route-glow').setAttribute('d', d);
+        const path = mk('path', 'route-path');
+        path.setAttribute('d', d);
+        path.setAttribute('data-v-39982a9c', '');
+      }
+    }
+  }
+  // 2) 标记：以世界坐标定位（视图 transform 统一映射到屏幕），但徽章不随地图缩放：
+  //    marker-grid 按 --badge-inv（BADGE_K/view.scale）反向缩放，68px 设计恒定显示
+  //    32px，形状与内部比例不变
+  const mSize = BADGE_DESIGN;
+  // 图标 56 + padding 2×2 + 边框 4×2 = 68：边框加厚到 4px（屏显约 1.9px）后用图标尺寸补偿，外框保持 68px 设计常量（屏显恒 32px）
+  const imgSize = 56;
+  // 单个徽章标记（视觉层 + 双击命中区）。父点与 children 子点共用：
+  // 子点以自己分类的 key 渲染图标（如拉闸点 o_lzd 挂在撤离点下）。
+  const addMarker = (p, catId) => {
+    const pk = p.x + '_' + p.y;
+    const marker = el('div', 'marker', { [OM]: '' });
+    marker.style.left = p.x + 'px';
+    marker.style.top = p.y + 'px';
+    const grid = el('div', 'marker-grid', { [OM]: '' });
+    const mic = el('div', `marker-item-content marker-item-${p.class || 'open'}`, { [OM]: '' });
+    mic.style.cssText = `position:relative;width:${mSize}px`;
+    if (p.tips) {
+      const tips = el('div', 'marker-item-tips', { [OM]: '' });
+      tips.textContent = p.tips;
+      mic.appendChild(tips);
+    }
+    const mi = el('div', 'marker-item', { [OM]: '' });
+    const img = el('img', 'marker-img select-none', { [OM]: '', draggable: 'false', src: iconSrc(catId) });
+    // 宽高都写死成正方形，非 1:1 图标拉伸为 1:1，
+    // 保证徽章框恒为 68×68
+    img.style.width = imgSize + 'px';
+    img.style.height = imgSize + 'px';
+    mi.appendChild(img);
+    if (p.count) {
+      const badge = el('div', 'marker-count', { [OM]: '' });
+      badge.textContent = p.count;
+      mi.appendChild(badge);
+    }
+    mic.appendChild(mi);
+    mic.dataset.pk = pk;
+    grid.appendChild(mic);
+    marker.appendChild(grid);
+    layer.appendChild(marker);
+    // 徽章屏幕固定 32px，命中半径 hw 即屏幕像素（updateInteraction 不再乘 view.scale）
+    hits.push({ x: p.x, y: p.y, hw: BADGE_SCREEN / 2, p, catId });
+  };
+  for (const [categoryId, arr] of Object.entries({ [catId]: data.Points[catId] || [] })) {
+    if (!state.activeCats.has(categoryId)) continue;
+    for (const p of arr) {
+      if (!pointVisible(p)) continue;
+      addMarker(p, catId);
+      // 父点可见即连带给 children 子点建标记，
+      // 子点不再按模式/事件单独过滤，图标/名称取子分类自身。
+      if (p.children)
+        for (const [childCat, childArr] of Object.entries(p.children))
+          for (const c of childArr) addMarker(c, childCat);
+    }
+  }
+
+  return { layer, svg, hits };
+}
+function syncCategoryNodes() {
+  const layer = $('#marker-layer'), svg = $('#world-svg');
+  for (const [id, nodes] of categoryNodes) {
+    if (!state.activeCats.has(id)) {
+      nodes.layer.remove(); nodes.svg.remove(); categoryNodes.delete(id);
+    }
+  }
+  let markerNext = layer.firstChild;
+  let svgNext = svg.firstChild;
+  hitPoints = [];
+  for (const id of Object.keys(D.maps[state.map].Points)) {
+    if (!state.activeCats.has(id)) continue;
+    if (!categoryNodes.has(id)) categoryNodes.set(id, buildCategoryNodes(id));
+    const nodes = categoryNodes.get(id);
+    // Preserve data order and node identity, including overlapping child points.
+    if (nodes.layer !== markerNext) layer.insertBefore(nodes.layer, markerNext);
+    markerNext = nodes.layer.nextSibling;
+    if (nodes.svg !== svgNext) svg.insertBefore(nodes.svg, svgNext);
+    svgNext = nodes.svg.nextSibling;
+    hitPoints.push(...nodes.hits);
+  }
+}
+const categoryPerf = { updates: 0, maxSyncMs: 0, maxFrameMs: 0 };
+function updateCategories(ids, selected) {
+  const start = performance.now();
+  for (const id of ids) selected ? state.activeCats.add(id) : state.activeCats.delete(id);
+  stashModeCats(); persist();
+  for (const tile of document.querySelectorAll('#sidebar .sb-tile[data-category]'))
+    tile.classList.toggle('on', state.activeCats.has(tile.dataset.category));
+  pendingMarkerClick = null;
+  syncCategoryNodes();
+  if (pointerPosition) trackPointer(pointerPosition.clientX, pointerPosition.clientY);
+  const syncMs = performance.now() - start;
+  categoryPerf.updates++; categoryPerf.maxSyncMs = Math.max(categoryPerf.maxSyncMs, syncMs);
+  reportTracking('INFO', 'categories', '物资分类局部更新',
+    { ...categoryPerf, syncMs, changedCategories: ids.length, selectedCategories: state.activeCats.size,
+      markers: hitPoints.length, width: innerWidth, height: innerHeight, dpr: devicePixelRatio });
+  requestAnimationFrame(() => {
+    const nextFrameMs = performance.now() - start;
+    categoryPerf.maxFrameMs = Math.max(categoryPerf.maxFrameMs, nextFrameMs);
+    reportTracking('INFO', 'category-frame', '物资分类更新后动画帧回调',
+      { nextFrameMs, ...categoryPerf, markers: hitPoints.length });
+  });
+}
+function renderMap() {
+  // 当前地图/模式文案由 buildSidebar 的头部行（#switch-btn）直接读取 state 渲染
+  const layer = $('#marker-layer');
+  pendingMarkerClick = null;
+  categoryNodes.clear();
+  layer.innerHTML = '';
+  const svg = $('#world-svg');
+  svg.innerHTML = '';
+  const labels = $('#label-layer');
+  labels.innerHTML = '';
+  hitPoints = [];
+
+  const data = D.maps[state.map];
+  const svgNS = 'http://www.w3.org/2000/svg';
+  syncCategoryNodes();
+  // 特殊事件圈（琥珀脉冲 + 中心点）：所有选中事件各自画圈
+  const evConfs = D.mapConf[state.map].events || {};
+  for (const k of state.events) {
+    const ev = evConfs[k];
+    if (!ev || !ev.circle) continue;
+    const ci = document.createElementNS(svgNS, 'circle');
+    ci.setAttribute('cx', ev.circle.x); ci.setAttribute('cy', ev.circle.y);
+    ci.setAttribute('r', ev.circle.radius || 160);
+    ci.setAttribute('class', 'ring-event');
+    svg.appendChild(ci);
+    const dot = document.createElementNS(svgNS, 'circle');
+    dot.setAttribute('cx', ev.circle.x); dot.setAttribute('cy', ev.circle.y);
+    dot.setAttribute('r', 6);
+    dot.setAttribute('class', 'ring-event-dot');
+    svg.appendChild(dot);
+  }
+
+  // 3) 地标
+  if (state.labelsOn) {
+    const fsLabel = 16;
+    for (const lab of data.Labels) {
+      const d = el('div', 'map-label', { [OM]: '' });
+      d.style.left = lab.x + 'px';
+      d.style.top = lab.y + 'px';
+      d.style.fontSize = fsLabel + 'px';
+      d.textContent = lab.label;
+      labels.appendChild(d);
+    }
+  }
+  applyView();
+}
+
+/* ---------- 点位详情卡片 ---------- */
+let popoverEl = null;
+let popoverPoint = null;
+const OE = 'data-v-ee8e5045';  // 标题组件 scoped id
+const ARROW_SVG = {
+  left: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" aria-hidden="true"><path fill="currentColor" fill-opacity=".15" d="M512 140c-205.4 0-372 166.6-372 372s166.6 372 372 372s372-166.6 372-372s-166.6-372-372-372m104 240.9c0 10.3-4.9 19.9-13.2 25.9L457.4 512l145.4 105.1c8.3 6 13.2 15.7 13.2 25.9v46.9c0 6.5-7.4 10.3-12.7 6.5l-246-178a7.95 7.95 0 0 1 0-12.9l246-178c5.3-3.8 12.7 0 12.7 6.5z"/><path fill="currentColor" d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448s448-200.6 448-448S759.4 64 512 64m0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372s372 166.6 372 372-166.6 372-372 372"/><path fill="currentColor" d="m603.3 327.5l-246 178a7.95 7.95 0 0 0 0 12.9l246 178c5.3 3.8 12.7 0 12.7-6.5V643c0-10.2-4.9-19.9-13.2-25.9L457.4 512l145.4-105.2c8.3-6 13.2-15.6 13.2-25.9V334c0-6.5-7.4-10.3-12.7-6.5"/></svg>',
+  right: '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" aria-hidden="true"><path fill="currentColor" fill-opacity=".15" d="M512 140c-205.4 0-372 166.6-372 372s166.6 372 372 372s372-166.6 372-372s-166.6-372-372-372m154.7 378.4l-246 178c-5.3 3.8-12.7 0-12.7-6.5V643c0-10.2 4.9-19.9 13.2-25.9L566.6 512L421.2 406.8c-8.3-6-13.2-15.6-13.2-25.9V334c0-6.5 7.4-10.3 12.7-6.5l246 178c4.4 3.2 4.4 9.7 0 12.9"/><path fill="currentColor" d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448s448-200.6 448-448S759.4 64 512 64m0 820c-205.4 0-372-166.6-372-372s166.6-372 372-372s372 166.6 372 372-166.6 372-372 372"/><path fill="currentColor" d="m666.7 505.5l-246-178c-5.3-3.8-12.7 0-12.7 6.5v46.9c0 10.3 4.9 19.9 13.2 25.9L566.6 512L421.2 617.1c-8.3 6-13.2 15.7-13.2 25.9v46.9c0 6.5 7.4 10.3 12.7 6.5l246-178c4.4-3.2 4.4-9.7 0-12.9"/></svg>',
+};
+function closePopover() {
+  pendingMarkerClick = null;
+  if (popoverEl) { popoverEl.remove(); popoverEl = null; }
+  popoverPoint = null;
+  if (pointerPosition) trackPointer(pointerPosition.clientX, pointerPosition.clientY);
+}
+function catEntry(catId) {
+  for (const [gid, entries] of Object.entries(D.catalog))
+    for (const e of entries) if (e.id === catId) return { entry: e, group: gid };
+  return null;
+}
+/* 素材路径：带子目录的按原样拼；纯文件名加分类组目录（customSrc ?? 组名） */
+/* 详情图相对路径（相对 images/dfmap/<map>/data/，与外置资源仓根一一对应）：
+   带子目录的按原样拼；纯文件名加分类组目录（customSrc ?? 组名） */
+function contentRel(catId, f) {
+  if (!f) return '';
+  const rel = f.includes('/') ? f : (() => {
+    const ce = catEntry(catId);
+    const base = ce && (ce.entry.customSrc || ce.group);
+    return base ? base + '/' + f : null;
+  })();
+  return rel || '';
+}
+function contentUrl(catId, f, map = state.map) {
+  const rel = contentRel(catId, f);
+  return rel ? `images/dfmap/${map}/data/${rel}` : '';
+}
+// 点位详情图外置静态资源仓（Gitee 按地图一仓，由 scripts/push_detail_repos.py 维护，
+// 仓库根与本地图 data/ 目录一一对应）。开发态优先本地副本；打包产物（preload 注入的
+// runtime.remoteMedia，即 app.isPackaged）直接以 raw 直链为主源——安装包不含
+// images/dfmap/*/data/。图标等其余图片无论环境都仅本地。cxjy 暂无详情图，条目预留。
+const REMOTE_MEDIA = !!window.overlay?.runtime?.remoteMedia;
+const ASSET_RAW = {
+  az3: 'https://gitee.com/coolc/delta-box-az3/raw/master/',
+  cgxg: 'https://gitee.com/coolc/delta-box-cgxg/raw/master/',
+  bks: 'https://gitee.com/coolc/delta-box-bks/raw/master/',
+  lhdb: 'https://gitee.com/coolc/delta-box-lhdb/raw/master/',
+  htjd: 'https://gitee.com/coolc/delta-box-htjd/raw/master/',
+  cxjy: 'https://gitee.com/coolc/delta-box-cxjy/raw/master/',
+};
+// 卡片标题（名称 - 性质）
+function buildCardTitle(p, catId) {
+  const cls = p.class || 'open';
+  const box = el('div', 'flex items-center font-bold text-[16px]', { [OE]: '', [OM]: '' });
+  const name = document.createTextNode(' ' + (D.names[catId] || catId) + ' ');
+  const sep = el('span', 'mx-2', { [OE]: '' }); sep.textContent = ' - ';
+  const icon = el('span', `icon-item !w-[12px] !h-[12px] mx-1 icon-item-${cls}`, { [OE]: '' });
+  const clsName = document.createTextNode(' ' + (D.chips[cls]?.name || CLASS_NAMES[cls] || cls) + ' ');
+  box.append(name, sep, icon, clsName);
+  return box;
+}
+// 卡片正文
+function buildCardBody(p, catId) {
+  const map = state.map; // 卡片保留期间切图，轮播仍读取打开时所属地图的素材。
+  const entry = catEntry(catId)?.entry;
+  const imgs = p.contents || (p.content ? [p.content] : []);
+  const body = el('div', 'base-css', { [OP]: '', [OM]: '' });
+  const st = { idx: 0, zoomed: false };   // 轮播索引 / 小地图放大态
+
+  /* 头部：点位说明 + 版本标记 */
+  const head = el('div', 'mb-2', { [OP]: '' });
+  const label = el('span', null, { [OP]: '' });
+  label.innerHTML = esc(p.label || '').replaceAll('\n', '<br/>');
+  head.appendChild(label);
+  const ver = entry?.verAdd || p.verAdd, verDel = entry?.verDel || p.verDel, verEdit = entry?.verEdit || p.verEdit;
+  if (ver) {
+    const s = el('span', 'text-green-500', { [OP]: '' }); s.textContent = ` (V${ver} 新增) `;
+    head.appendChild(s);
+  } else if (verDel) {
+    const s = el('span', 'text-red-500', { [OP]: '' }); s.textContent = ` (V${verDel} 删除，后续版本删除) `;
+    head.appendChild(s);
+  } else if (verEdit) {
+    const s = el('span', 'text-yellow-500', { [OP]: '' }); s.textContent = ` (V${verEdit} 调整) `;
+    head.appendChild(s);
+  }
+  body.appendChild(head);
+  if (p.collecting) {
+    const c = el('p', 'text-red-500', { [OP]: '' }); c.textContent = '(只含部分素材，更多正在收集中...)';
+    body.appendChild(c);
+  }
+
+  if (!imgs.length) {
+    // 无素材时展示占位提示：暂无图示，欢迎投稿
+    const empty = el('div', 'text-center', { [OP]: '', style: 'padding:18px 0;color:#8a919c;font-size:13px;' });
+    empty.textContent = '暂无图示，欢迎投稿';
+    body.appendChild(empty);
+    return body;
+  }
+
+  const mediaCls = 'img-item-css';
+  const makeMedia = (f) => {
+    const isImg = !/\.(mp4|webm)$/i.test(f);
+    const m = el(isImg ? 'img' : 'video', `marker-data-img ${mediaCls}`, { [OP]: '', preview: 'false' });
+    if (!isImg) { m.controls = true; m.preload = 'metadata'; }
+    const rel = contentRel(catId, f), raw = ASSET_RAW[map];
+    const local = contentUrl(catId, f, map), remote = raw && rel ? raw + rel : '';
+    m.src = REMOTE_MEDIA ? (remote || local) : (local || remote);
+    // 单次交叉回退：主来源失败换另一来源（开发态本地缺图 → 资源仓；生产态仓库
+    // 缺图/断网 → 本地路径，打包版通常无本地副本，等价于空缺显示）。
+    if (local && remote) m.onerror = () => { m.onerror = null; m.src = m.src === local ? remote : local; };
+    return m;
+  };
+
+  if (p.content) {
+    /* 单素材：小地图 ( M ) 按钮 + 可放大截图 */
+    const wrap = el('div', 'flex justify-center img-item img-base', { [OP]: '', style: 'position:relative;' });
+    const btnBox = el('div', 'img-map-btn', { [OP]: '' });
+    const btn = el('button', 'css-hxvfe1 ant-btn ant-btn-primary ant-btn-sm', { type: 'button' });
+    const setBtn = () => {
+      btn.innerHTML = st.zoomed
+        ? '<span>还原 ( <span class="px-1 underline underline-offset-2"> M </span> )</span>'
+        : '<span>小地图 ( <span class="px-1 underline underline-offset-2"> M </span> )</span>';
+    };
+    setBtn();
+    btn.onclick = (e) => {
+      e.stopPropagation();
+      st.zoomed = !st.zoomed;
+      media.classList.toggle('zoom-top-left', st.zoomed);
+      setBtn();
+    };
+    btnBox.appendChild(btn);
+    wrap.appendChild(btnBox);
+    const media = makeMedia(p.content);
+    wrap.appendChild(media);
+    body.appendChild(wrap);
+    return body;
+  }
+
+  /* 多素材：计数角标 + 轮播（箭头/圆点控制） */
+  const wrap = el('div', 'relative img-item', { [OP]: '' });
+  const tips = el('div', 'img-item-tips', { [OP]: '' });
+  const alert = el('div', 'ant-alert css-hxvfe1 ant-alert-info ant-alert-no-icon', { role: 'alert' });
+  const alertContent = el('div', 'ant-alert-content');
+  const alertMsg = el('div', 'ant-alert-message');
+  alertContent.appendChild(alertMsg);
+  alert.appendChild(alertContent);
+  tips.appendChild(alert);
+  wrap.appendChild(tips);
+  const slider = el('div', 'slick-slider');
+  const list = el('div', 'slick-list');
+  const track = el('div', 'slick-track');
+  const slide = el('div', 'slick-slide slick-current');
+  slide.appendChild(makeMedia(imgs[0]));
+  track.appendChild(slide);
+  list.appendChild(track);
+  slider.appendChild(list);
+  const prev = el('button', 'slick-arrow slick-prev custom-slick-arrow !left-[3px]', { type: 'button' });
+  prev.innerHTML = ARROW_SVG.left;
+  const next = el('button', 'slick-arrow slick-next custom-slick-arrow !right-[3px]', { type: 'button' });
+  next.innerHTML = ARROW_SVG.right;
+  slider.append(prev, next);
+  const dots = el('ul', 'slick-dots slick-dots-top');
+  for (let i = 0; i < imgs.length; i++) {
+    const li = el('li', i === 0 ? 'slick-active' : null);
+    li.appendChild(el('button'));
+    dots.appendChild(li);
+  }
+  slider.appendChild(dots);
+  wrap.appendChild(slider);
+  body.appendChild(wrap);
+
+  const render = () => {
+    slide.innerHTML = '';
+    slide.appendChild(makeMedia(imgs[st.idx]));
+    alertMsg.textContent = `${st.idx + 1} / ${imgs.length}`;
+    dots.querySelectorAll('li').forEach((li, i) => li.classList.toggle('slick-active', i === st.idx));
+  };
+  const go = (d) => { st.idx = (st.idx + d + imgs.length) % imgs.length; render(); };
+  prev.onclick = (e) => { e.stopPropagation(); go(-1); };
+  next.onclick = (e) => { e.stopPropagation(); go(1); };
+  dots.querySelectorAll('li').forEach((li, i) => li.onclick = (e) => { e.stopPropagation(); st.idx = i; render(); });
+  render();
+  return body;
+}
+// 组装整卡
+function buildCard(p, catId) {
+  const card = el('div', 'ant-card css-hxvfe1 ant-card-bordered ant-card-small', { [OM]: '' });
+  const head = el('div', 'ant-card-head');
+  const headWrap = el('div', 'ant-card-head-wrapper');
+  const headTitle = el('div', 'ant-card-head-title');
+  headTitle.appendChild(buildCardTitle(p, catId));
+  headWrap.appendChild(headTitle);
+  head.appendChild(headWrap);
+  card.appendChild(head);
+  const cardBody = el('div', 'ant-card-body');
+  cardBody.appendChild(buildCardBody(p, catId));
+  card.appendChild(cardBody);
+  return card;
+}
+function showPopover(sx, sy, p, catId) {
+  // 已打开的卡片独立于定位/点位重绘，只由关闭按钮、Esc/M 或另一点位替换关闭。
+  if (popoverEl && popoverPoint?.p === p && popoverPoint.catId === catId && popoverPoint.map === state.map) return;
+  closePopover();
+  const anchor = el('div', 'popover-anchor popover-anchor-bottom', { [OM]: '' });
+  anchor.style.cssText = 'position:absolute;z-index:120;pointer-events:auto;opacity:1;';
+  const card = buildCard(p, catId);
+  card.style.position = 'relative';
+  // 右上角关闭按钮
+  const close = el('span', 'popover-close', { title: '关闭' });
+  close.textContent = '✕';
+  close.onclick = (e) => { e.stopPropagation(); closePopover(); };
+  card.appendChild(close);
+  anchor.appendChild(card);
+  anchor.onmousedown = (e) => e.stopPropagation();
+  $('#popup-layer').appendChild(anchor);
+  /* 卡片定位：默认在徽章下方（间隔 10px），下方放不下翻到上方（间隔 12px）；水平居中于点位。
+     徽章以点位为中心、屏幕恒定 BADGE_SCREEN 像素（见 #marker-layer .marker 的覆盖与反向缩放） */
+  const M_SIZE = BADGE_SCREEN;
+  const cw = anchor.offsetWidth, ch = anchor.offsetHeight;
+  const gapBottom = M_SIZE / 2 + 10, gapTop = M_SIZE / 2 + 12;
+  let placement = 'bottom';
+  if (sy + gapBottom + ch > innerHeight - 8 && sy - ch - gapTop >= 8) placement = 'top';
+  const left = Math.max(4, Math.min(sx - cw / 2, innerWidth - cw - 4));
+  const top = placement === 'bottom' ? sy + gapBottom : sy - ch - gapTop;
+  anchor.classList.toggle('popover-anchor-bottom', placement === 'bottom');
+  anchor.classList.toggle('popover-anchor-top', placement === 'top');
+  anchor.style.left = left + 'px';
+  anchor.style.top = top + 'px';
+  popoverEl = anchor;
+  popoverPoint = { p, catId, map: state.map };
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key?.toLowerCase() === 'm') closePopover();
+  if (e.key === 'Escape') {
+    if (popoverEl) closePopover();
+    else if ($('#map-menu').classList.contains('open')) {
+      $('#map-menu').classList.remove('open');
+      $('#switch-btn')?.classList.remove('menu-open');
+    }
+  }
+});
+
+/* ---------- 地图 / 模式切换菜单 ---------- */
+function buildMenu() {
+  const menu = $('#map-menu');
+  menu.innerHTML = '';
+  // 自动换图开启时锁定地图与难度的手动切换：均由对局识别自动跟随，避免手动选择
+  // 与识别来回打架；关闭自动换图后恢复手动（菜单每次打开重建）
+  if (state.autoMap) {
+    const lock = el('div', 'map-lock');
+    lock.textContent = '自动换图已开启：地图与难度均随对局识别自动切换，关闭后可手动选择';
+    menu.appendChild(lock);
+  }
+  for (const [key, conf] of Object.entries(D.mapConf)) {
+    const row = el('div', 'map-row');
+    const thumb = el('img', 'map-thumb', { src: `images/dfmap/${key}.webp` });
+    const name = el('div', 'map-name'); name.textContent = conf.name;
+    row.appendChild(thumb); row.appendChild(name);
+    for (const m of conf.modes) {
+      const btn = el('button', 'mode-btn');
+      btn.textContent = D.modeNames[m.mode];
+      // 潮汐监狱（cxjy）数据已本地铺好：disabled 标记在渲染层放开（见 LOCAL_MODE_UNLOCK）
+      if (m.disabled && !LOCAL_MODE_UNLOCK[key]) btn.disabled = true;
+      if (state.autoMap) {
+        btn.disabled = true;
+        btn.title = '自动换图开启中，地图与难度由识别自动切换';
+      }
+      if (key === state.map && m.mode === state.mode) btn.classList.add('current');
+      btn.onclick = () => {
+        stashModeCats();                      // 分类勾选按（地图+难度）记忆：切走前存回
+        state.modeManualAt = Date.now();   // 手动选难度后短暂抑制难度自动识别
+        state.map = key; state.mode = m.mode; state.floor = null;
+        applyModeCats();
+        state.events = []; state.eventManualAt = {};
+        persist(); menu.classList.remove('open'); buildSidebar(); renderMap(); resetTracking();
+      };
+      row.appendChild(btn);
+    }
+    menu.appendChild(row);
+  }
+}
+/* 切换地图菜单：锚定侧边栏头部下方弹出（按钮随 buildSidebar 重建，绑定在头部行上）。
+   每次打开都重建内容——自动换图开关/自动切图后，锁定态与当前图标记要保持新鲜。
+   #map-menu 带分辨率自适应 zoom：JS 设的 px 偏移会被 zoom 乘算，须除回；
+   右缘钳制用 offsetWidth*z 换算成视觉宽度后再比较 */
+function toggleMapMenu() {
+  const menu = $('#map-menu');
+  const opening = !menu.classList.contains('open');
+  if (opening) buildMenu();
+  menu.classList.toggle('open');
+  const btn = $('#switch-btn');
+  btn?.classList.toggle('menu-open', opening);
+  if (!opening || !btn) return;
+  const r = btn.getBoundingClientRect();
+  const z = uiZoom();
+  menu.style.left = (Math.max(4, Math.min(r.left, window.innerWidth - menu.offsetWidth * z - 4)) / z) + 'px';
+  menu.style.top = ((r.bottom + 6) / z) + 'px';
+}
+document.addEventListener('click', (e) => {
+  if (!$('#map-menu').contains(e.target) && !e.target.closest('#switch-btn')) $('#map-menu').classList.remove('open');
+});
+
+/* ---------- 鼠标穿透：仅侧边栏 / 菜单 / 已打开的详情卡接管输入 ---------- */
+let interactive = false;
+let pushedRect = false;   // false=尚未推送；null=穿透；{x,y,w,h}=当前交互矩形（CSS px）
+const sameRect = (a, b) => !!a && !!b && a.x === b.x && a.y === b.y && a.w === b.w && a.h === b.h;
+// 把命中的交互矩形推给宿主端（去重：值不变不重发）。宿主端据此定位输入接管窗口，
+// 主窗口穿透样式永不翻转——改层叠窗口样式会把全屏优化/独占全屏的游戏踢回桌面。
+function pushInteractiveRect(rect) {
+  const next = rect && rect.w > 0 && rect.h > 0 ? rect : null;
+  if (pushedRect !== false && (pushedRect === next || sameRect(pushedRect, next))) return;
+  pushedRect = next;
+  window.overlay?.setInteractiveRect?.(next);
+}
+function setInteract(v, rect = null) {
+  if (v === interactive) { pushInteractiveRect(rect); return; }
+  interactive = v;
+  pushInteractiveRect(rect);
+}
+// High polling-rate mice can generate hundreds of moves per frame. Keep only the
+// latest position and perform geometry reads / hit testing once per paint.
+let pointerFrame = null, pointerPosition = null;
+// 两个光标来源汇入同一入口：可交互时是宿主 DOM mousemove；穿透时窗口收不到
+// DOM 事件（未启用 forward 转发，见 main.js），由主进程屏幕光标坐标
+// （cursor:move，~60Hz 节流）驱动同一套命中测试。
+function trackPointer(clientX, clientY) {
+  pointerPosition = { clientX, clientY };
+  if (pointerFrame === null) pointerFrame = requestAnimationFrame(updateInteraction);
+}
+function updateInteraction() {
+  pointerFrame = null;
+  const e = pointerPosition;
+  if (!e) return;
+  const rect = interactiveRectAt(e.clientX, e.clientY);
+  setInteract(!!rect, rect);
+}
+function interactiveRectAt(clientX, clientY) {
+  const e = { clientX, clientY };
+  // 轮询光标可能位于副屏或游戏客户区外，不能把负 x 当成侧栏悬停。
+  if (![e.clientX, e.clientY].every(Number.isFinite) || e.clientX < 0 || e.clientY < 0 ||
+      e.clientX >= innerWidth || e.clientY >= innerHeight) {
+    return null;
+  }
+  // 级联命中：第一个命中的区域给出交互矩形（CSS px），推给宿主端定位输入窗口
+  let rect = null;
+  const wrap = $('#sidebar');
+  if (wrap) {
+    const r = wrap.getBoundingClientRect();   // 单次布局读取：展开=整个侧栏+外沿把手(28px)，折叠=只剩把手区域
+    if (state.sidebarCollapsed) {
+      // 命中区取把手自身 rect（含边距与原硬编码带一致），跟随几何覆盖与 ui-zoom；
+      // 原固定带 y60~150 在 1080p（zoom=0.75）下够不到把手顶部
+      const hb = wrap.querySelector('#collapse-handle')?.getBoundingClientRect();
+      if (hb && e.clientX >= hb.left - 2 && e.clientX <= hb.right + 2 && e.clientY >= hb.top - 2 && e.clientY <= hb.bottom + 10)
+        rect = { x: hb.left - 4, y: hb.top - 2, w: hb.width + 8, h: hb.height + 14 };
+    } else if (e.clientX <= r.right + 30) {
+      rect = { x: 0, y: 0, w: r.right + 32, h: innerHeight };
+    }
+  }
+  if (!rect) {
+    const sb = $('#switch-btn');   // 地图页头部行；记牌器页无此元素
+    if (sb) {
+      const r = sb.getBoundingClientRect();
+      if (e.clientX >= r.left - 4 && e.clientX <= r.right + 4 && e.clientY >= r.top - 4 && e.clientY <= r.bottom + 4)
+        rect = { x: r.left - 6, y: r.top - 6, w: r.width + 12, h: r.height + 12 };
+    }
+  }
+  if (!rect && $('#map-menu').classList.contains('open')) {
+    const mr = $('#map-menu').getBoundingClientRect();
+    if (e.clientX >= mr.left - 4 && e.clientX <= mr.right + 4 && e.clientY >= mr.top - 4 && e.clientY <= mr.bottom + 4)
+      rect = { x: mr.left - 6, y: mr.top - 6, w: mr.width + 12, h: mr.height + 12 };
+  }
+  if (!rect && $('#am-confirm').classList.contains('open')) {
+    const ar = $('#am-confirm').getBoundingClientRect();
+    if (e.clientX >= ar.left - 4 && e.clientX <= ar.right + 4 && e.clientY >= ar.top - 4 && e.clientY <= ar.bottom + 4)
+      rect = { x: ar.left - 6, y: ar.top - 6, w: ar.width + 12, h: ar.height + 12 };
+  }
+  if (!rect && $('#cap-confirm').classList.contains('open')) {
+    const cr = $('#cap-confirm').getBoundingClientRect();
+    if (e.clientX >= cr.left - 4 && e.clientX <= cr.right + 4 && e.clientY >= cr.top - 4 && e.clientY <= cr.bottom + 4)
+      rect = { x: cr.left - 6, y: cr.top - 6, w: cr.width + 12, h: cr.height + 12 };
+  }
+  if (!rect && $('#ns-confirm').classList.contains('open')) {
+    const nr = $('#ns-confirm').getBoundingClientRect();
+    if (e.clientX >= nr.left - 4 && e.clientX <= nr.right + 4 && e.clientY >= nr.top - 4 && e.clientY <= nr.bottom + 4)
+      rect = { x: nr.left - 6, y: nr.top - 6, w: nr.width + 12, h: nr.height + 12 };
+  }
+  if (!rect && popoverEl) {
+    const pr = popoverEl.getBoundingClientRect();
+    if (e.clientX >= pr.left - 4 && e.clientX <= pr.right + 4 && e.clientY >= pr.top - 4 && e.clientY <= pr.bottom + 4)
+      rect = { x: pr.left - 6, y: pr.top - 6, w: pr.width + 12, h: pr.height + 12 };
+  }
+  return rect;
+}
+// 单击原样落到下方游戏，宿主只旁观完整点击。双击需同时满足系统时间/距离、
+// 同一可见物资点、同一定位代次，且两次按下/抬起均不在侧栏或详情卡上。
+let pendingMarkerClick = null;
+function markerAt(x, y) {
+  if (![x, y].every(Number.isFinite) || x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) return null;
+  const s = sView();
+  for (let i = hitPoints.length - 1; i >= 0; i--) {
+    const hp = hitPoints[i];
+    const rr = Math.max(hp.hw, 14);
+    if (Math.hypot(hp.x * s + view.tx - x, hp.y * s + view.ty - y) <= rr) return hp;
+  }
+  return null;
+}
+function acceptMarkerClick(event) {
+  const previous = pendingMarkerClick;
+  pendingMarkerClick = null;
+  const now = Date.now();
+  if (!event?.eligible || !tracking.valid || now - tracking.capturedAt > 750 ||
+      ![event.x, event.y, event.downX, event.downY, event.pressedAt, event.releasedAt, event.sequence].every(Number.isFinite) ||
+      now - event.releasedAt > 750 || event.releasedAt > now + 100 || event.pressedAt < tracking.notBefore ||
+      interactiveRectAt(event.x, event.y) || interactiveRectAt(event.downX, event.downY)) return false;
+  const hp = markerAt(event.x, event.y), down = markerAt(event.downX, event.downY);
+  if (!hp?.p || hp.p !== down?.p || hp.catId !== down?.catId) {
+    return false;
+  }
+  if (event.doubleClick && previous?.p === hp.p && previous.catId === hp.catId &&
+      previous.epoch === tracking.epoch && previous.map === state.map && previous.sequence + 1 === event.sequence) {
+    showPopover(hp.x * sView() + view.tx, hp.y * sView() + view.ty, hp.p, hp.catId);
+    reportTracking('INFO', 'marker-detail', '双击打开物资点详情', { catId: hp.catId, x: hp.x, y: hp.y });
+    trackPointer(event.x, event.y);
+    return true;
+  }
+  pendingMarkerClick = { p: hp.p, catId: hp.catId, sequence: event.sequence, epoch: tracking.epoch, map: state.map };
+  return false;
+}
+window.addEventListener('mousemove', (e) => trackPointer(e.clientX, e.clientY), { passive: true });
+window.addEventListener('blur', () => {
+  pendingMarkerClick = null;
+  window.overlay?.cancelPointer?.();
+  if (pointerFrame !== null) cancelAnimationFrame(pointerFrame);
+  pointerFrame = null;
+  pointerPosition = null;
+  setInteract(false);
+});
+
+/* ---------- 启动 ---------- */
+window.addEventListener('resize', () => { applyUiZoom(); resetTracking(); renderMap(); });
+// 调试辅助：?cats=bxx,dyx 预先激活类别
+const urlCats = new URLSearchParams(location.search).get('cats');
+if (urlCats) urlCats.split(',').forEach(c => state.activeCats.add(c.trim()));
+applyUiZoom();
+startSbClock();
+buildMenu();
+buildSidebar();
+renderMap();
+resetTracking();
+applyNoSignalMapVisibility();
+// 启动即回放持久化的「直播/录屏模式」，与主进程在显示窗口前恢复的保存值保持一致。
+window.overlay?.setDesktopCapture?.(state.desktopCapture);
+window.overlay?.setCaptureHidden?.(state.streamHide);
+
+/* ---------- 视觉结果与界面光标事件 ---------- */
+if (window.overlay?.onView) {
+  window.overlay.onView('tracking:result', acceptTracking);
+  window.overlay.onView('tracking:reset', resetTracking);
+  window.overlay.onView('tracking:map-key', hideMapForKey);
+  window.overlay.onView('cursor:move', (p) => trackPointer(p.x, p.y));
+  window.overlay.onView('marker:click', acceptMarkerClick);
+  window.overlay.onView('about:update', applyAboutUpdate);
+  // 关于页初始内容直接读内置默认（data/about.json = about/ 内容仓的内置副本），
+  // 主进程 about:update（上次快照/远端最新）随后覆盖；网络获取失败也有完整内容
+  fetch('data/about.json')
+    .then(r => (r.ok ? r.json() : null))
+    .then(d => { if (d && typeof d === 'object' && !aboutRemote) applyAboutUpdate(d); })
+    .catch(() => {});
+  window.overlay.onView('version:update', applyVersionUpdate);
+  window.overlay.onView('sidebar:toggle', toggleSidebar);
+}
+reportTracking('INFO', 'display', '叠加层显示参数',
+  { width: innerWidth, height: innerHeight, dpr: devicePixelRatio });
+if (typeof PerformanceObserver !== 'undefined' && PerformanceObserver.supportedEntryTypes?.includes('longtask')) {
+  new PerformanceObserver(list => {
+    const entries = list.getEntries();
+    const maxMs = Math.max(...entries.map(e => e.duration));
+    reportTracking('WARN', 'long-task', '前端主线程长任务',
+      { maxMs, count: entries.length, selectedCategories: state.activeCats.size, markers: hitPoints.length });
+  }).observe({ type: 'longtask', buffered: false });
+}
+let uiHeartbeatAt = performance.now();
+let uiAnimationPending = false;
+setInterval(() => {
+  const now = performance.now(), gapMs = now - uiHeartbeatAt;
+  uiHeartbeatAt = now;
+  if (gapMs > 1500) reportTracking('WARN', 'ui-gap', '前端定时回调延迟', { gapMs });
+  // Keep just one outstanding callback. Separate animation scheduling delays
+  // from JS timer delays when a foreground game stresses the graphics pipeline.
+  if (!uiAnimationPending) {
+    uiAnimationPending = true;
+    const requestedAt = now;
+    requestAnimationFrame(() => {
+      uiAnimationPending = false;
+      const completedAt = performance.now(), waitMs = completedAt - requestedAt;
+      if (waitMs > 250) reportTracking('WARN', 'animation-gap', '前端动画回调延迟',
+        { waitMs, timerAgeMs: completedAt - uiHeartbeatAt,
+          visibility: document.visibilityState, focused: document.hasFocus() });
+    });
+  }
+}, 1000);
+// A stalled capture/worker must not leave apparently accurate markers on screen.
+setInterval(() => {
+  if (tracking.valid && Date.now() - tracking.capturedAt > 750) {
+    reportTracking('WARN', 'expired', '定位更新中断，自动隐藏点位',
+      { ageMs: Date.now() - tracking.capturedAt, lastSource: tracking.last?.source, lastMatchMs: tracking.last?.ms });
+    loseTracking('画面更新延迟 · 正在重新定位');
+  }
+}, 100);
+window.__viewDebug = () => ({ ...view, valid: tracking.valid, last: tracking.last });
+
+if (new URLSearchParams(location.search).has('dumpstate')) {
+  document.title = 'DBG:' + JSON.stringify({
+    map: state.map, mode: state.mode, events: state.events,
+    activeCats: [...state.activeCats], checkedClasses: [...state.checkedClasses],
+    labelsOn: state.labelsOn, w: innerWidth, h: innerHeight,
+    markers: document.querySelectorAll('.marker').length,
+    paths: document.querySelectorAll('#world-svg path').length,
+    view: window.__viewDebug(),
+  });
+}
+</script>
+</body>
+</html>
